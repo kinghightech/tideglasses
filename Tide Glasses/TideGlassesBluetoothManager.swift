@@ -83,6 +83,7 @@ final class TideGlassesBluetoothManager: NSObject, ObservableObject {
     private var userInitiatedDisconnect = false
     private var hasAttemptedLaunchScan = false
     private var wifiKeepAliveTimer: Timer?
+    private var autoReconnectTimer: Timer?
 
     private var isAutomatedWiFiTest: Bool {
         ProcessInfo.processInfo.arguments.contains("--tide-wifi-test")
@@ -105,6 +106,30 @@ final class TideGlassesBluetoothManager: NSObject, ObservableObject {
             || isPassiveProtocolTrace
             || isWiFiTransferResetTest
             || isDeviceRestartTest
+            || isAutoConnectEnabled
+    }
+
+    /// Mirrors the vendor app: once the glasses have been paired, every
+    /// launch and foreground quietly reconnects without the user asking.
+    private var isAutoConnectEnabled: Bool {
+        UserDefaults.standard.object(forKey: "tide.autoConnect") as? Bool ?? true
+    }
+
+    /// Called when the app comes to the foreground.
+    func reconnectIfNeeded() {
+        guard canScan, !isConnected, !isConnecting, !isScanning else { return }
+        startScan()
+    }
+
+    /// Keeps hunting for the glasses the whole time they are away — if they
+    /// are switched off, the app picks them up on its own the moment they
+    /// come back, without the user pressing anything.
+    private func startAutoReconnectLoop() {
+        guard autoReconnectTimer == nil else { return }
+        autoReconnectTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { [weak self] _ in
+            guard let self, self.isAutoConnectEnabled else { return }
+            self.reconnectIfNeeded()
+        }
     }
 
     private enum UUIDs {
@@ -235,7 +260,11 @@ final class TideGlassesBluetoothManager: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
             guard let self, self.isScanning else { return }
             self.stopScan()
-            if self.discoveredPeripheral == nil {
+            guard self.discoveredPeripheral == nil else { return }
+            if self.isAutoConnectEnabled {
+                // The reconnect loop tries again shortly; stay quiet about it.
+                self.status = "Waiting for glasses"
+            } else {
                 self.status = "No compatible glasses found"
                 self.errorMessage = "Keep the glasses on and disconnect them from Cyan Glasses, then scan again."
             }
@@ -999,6 +1028,7 @@ extension TideGlassesBluetoothManager: CBCentralManagerDelegate {
                 hasAttemptedLaunchScan = true
                 startScan()
             }
+            startAutoReconnectLoop()
         case .poweredOff:
             bluetoothStateDescription = "Off"
             status = "Bluetooth is off"

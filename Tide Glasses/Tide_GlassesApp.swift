@@ -24,12 +24,20 @@ struct Tide_GlassesApp: App {
         ))
     }
 
+    @AppStorage("tide.onboarded") private var onboarded = false
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environmentObject(glasses)
-                .environmentObject(media)
-                .environmentObject(album)
+            Group {
+                if onboarded {
+                    ContentView()
+                } else {
+                    OnboardingView()
+                }
+            }
+            .environmentObject(glasses)
+            .environmentObject(media)
+            .environmentObject(album)
         }
     }
 }
