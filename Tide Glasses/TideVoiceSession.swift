@@ -11,10 +11,13 @@
 //      0x59  payload <40 B>    Opus frames, one per 20 ms
 //      0x73  payload 0a 01     window closed  (~4.98 s after the start)
 //
-//  One click, one window, one question. An earlier version tried to stitch
-//  consecutive windows together to allow longer questions; it added a delay
-//  before every answer and was confusing to use, so it is gone. The firmware's
-//  rhythm is the app's rhythm.
+//  Five seconds is not always a sentence, and the window length belongs to the
+//  firmware — the only way to extend it is to put the glasses into
+//  speech-recognition mode ourselves, a write that has previously left the
+//  front button broken. So consecutive windows are STITCHED instead: after one
+//  closes there is a one-second grace period, and another click inside it
+//  continues the same question rather than starting a new one. Say nothing and
+//  it sends as normal.
 //
 //  Everything here hangs off the read-only `onPacket` tap on the BLE manager.
 //  No command is ever sent to the glasses, so the transfer path cannot be
@@ -31,6 +34,8 @@ final class TideVoiceSession: NSObject, ObservableObject {
     enum Phase: Equatable {
         case idle
         case listening
+        /// Window closed; waiting to see whether another click continues it.
+        case pausing
         case thinking
         case speaking
     }
@@ -48,11 +53,15 @@ final class TideVoiceSession: NSObject, ObservableObject {
 
     private var opusBuffer = Data()
     private var watchdog: Task<Void, Never>?
+    private var graceTimer: Task<Void, Never>?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     /// True once the audio route has been claimed. The session is then left
     /// active for the lifetime of the app — see `prepareAudioRoute()`.
     private var hasActivatedAudio = false
+
+    /// How long to wait after a window closes for another click to continue it.
+    private static let gracePeriod: Duration = .seconds(1)
 
     /// The firmware's window is ~5 s. If the closing event is ever lost, close
     /// it ourselves rather than buffering forever.
@@ -60,6 +69,9 @@ final class TideVoiceSession: NSObject, ObservableObject {
 
     /// Roughly a fifth of a second of audio. Shorter than this is a stray press.
     private static let minimumFrames = 10
+
+    /// A minute of stitched windows is already far past a spoken question.
+    private static let maximumFrames = 3_000
 
     private var isTriggerEnabled: Bool {
         UserDefaults.standard.object(forKey: "tide.voiceTrigger") as? Bool ?? true
@@ -87,7 +99,7 @@ final class TideVoiceSession: NSObject, ObservableObject {
             // part of the fixed 40-byte frame) and no de-duplication (repeated
             // payloads are real frames). Both mistakes are documented in
             // AGENTS.md because both have already cost us a debugging session.
-            guard phase == .listening else { return }
+            guard phase == .listening, capturedFrames < Self.maximumFrames else { return }
             opusBuffer.append(payload)
             capturedFrames += 1
 
@@ -97,7 +109,7 @@ final class TideVoiceSession: NSObject, ObservableObject {
             case Event.microphone where payload[1] == 0x01:
                 beginListening()
             case Event.microphone, Event.windowClosed:
-                finishListening()
+                pauseListening()
             default:
                 break
             }
@@ -111,32 +123,62 @@ final class TideVoiceSession: NSObject, ObservableObject {
 
     private func beginListening() {
         guard isTriggerEnabled else { return }
-        guard phase != .listening else { return }
 
-        // Interrupting playback means "never mind, listen to me instead".
-        if synthesizer.isSpeaking {
-            synthesizer.stopSpeaking(at: .immediate)
+        switch phase {
+        case .pausing:
+            // A click inside the grace period continues the same question:
+            // keep the buffer, just start listening again.
+            graceTimer?.cancel()
+            graceTimer = nil
+            phase = .listening
+            startWatchdog()
+
+        case .idle, .speaking:
+            // Interrupting playback means "never mind, listen to me instead".
+            if synthesizer.isSpeaking {
+                synthesizer.stopSpeaking(at: .immediate)
+            }
+            beginBackgroundAssertion()
+            opusBuffer = Data()
+            capturedFrames = 0
+            heardText = nil
+            errorText = nil
+            phase = .listening
+            startWatchdog()
+
+        case .listening, .thinking:
+            break
         }
+    }
 
-        beginBackgroundAssertion()
-        opusBuffer = Data()
-        capturedFrames = 0
-        heardText = nil
-        errorText = nil
-        phase = .listening
-
+    private func startWatchdog() {
         watchdog?.cancel()
         watchdog = Task { [weak self] in
             try? await Task.sleep(for: Self.windowLimit)
+            guard !Task.isCancelled else { return }
+            self?.pauseListening()
+        }
+    }
+
+    /// The firmware closed its window. Hold the audio for a moment in case
+    /// another click continues the sentence.
+    private func pauseListening() {
+        guard phase == .listening else { return }
+        watchdog?.cancel()
+        watchdog = nil
+        phase = .pausing
+
+        graceTimer?.cancel()
+        graceTimer = Task { [weak self] in
+            try? await Task.sleep(for: Self.gracePeriod)
             guard !Task.isCancelled else { return }
             self?.finishListening()
         }
     }
 
     private func finishListening() {
-        guard phase == .listening else { return }
-        watchdog?.cancel()
-        watchdog = nil
+        guard phase == .pausing else { return }
+        graceTimer = nil
 
         let captured = opusBuffer
         opusBuffer = Data()
@@ -188,6 +230,8 @@ final class TideVoiceSession: NSObject, ObservableObject {
         phase = .idle
         watchdog?.cancel()
         watchdog = nil
+        graceTimer?.cancel()
+        graceTimer = nil
         endBackgroundAssertion()
     }
 
