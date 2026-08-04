@@ -28,8 +28,10 @@ vendor's cloud. Bundle id `com.aahish.Tide-Glasses`.
 
 Working:
 - BLE connect, battery + charging, photo capture.
-- Wi-Fi media import: gallery, full-quality photo/video download, save to
+- Wi-Fi media import: gallery, full-quality photo/video/audio download, save to
   Photos + in-app album, progress UI. **Fragile — do not touch.**
+- Voice recordings play in-app (tap a tile → player sheet with waveform,
+  timings, play/pause).
 - UI: onboarding (name + pair), home screen (#111111, large glasses hero,
   glass status/battery pills, action tiles), settings, auto-reconnect loop.
 
@@ -61,10 +63,46 @@ Not working / known issues:
 - Firmware ends idle Wi-Fi sessions after ~40 s; a periodic IP query keeps it
   alive during transfers.
 
+## Physical buttons (measured 2026-08-03, supersedes earlier guesses)
+
+- **Back (black) button, held** → starts an audio recording on the glasses.
+- **Back button, single click** → puts the glasses into AI-listening mode.
+  This is the AI trigger. No wake word is needed and none can be renamed.
+- **Front (red) button**: 1 press photo, 2 presses video.
+- **The glasses never report button presses over BLE.** A passive capture of
+  all five notify/indicate channels during single/double/triple presses showed
+  zero press events — only the *result* (audio stream, media-count change).
+  So click-counting in the app is impossible; use what the firmware triggers.
+- Leaving speech-recognition mode enabled previously broke the front button.
+  Always stop any mode that gets started.
+
+## Audio recordings (solved 2026-08-03)
+
+- Saved on the glasses as **bare Opus**, extension `.opus` — no Ogg, no WAV
+  header. The file is a flat run of **40-byte CBR packets** (`4B 41 …`,
+  Opus TOC + frame-count byte), one 20 ms frame each, 16 kHz mono.
+  323 packets ≈ 6.5 s. It is the same framing the BLE mic stream uses.
+- **Never trim trailing zero bytes from a frame.** The nisaetus reference does
+  this; on this firmware the zeros are part of the fixed-size frame and
+  trimming corrupts ~60% of them. Pass the 40-byte payload whole.
+- **iOS decodes it with no third-party library**: AudioToolbox
+  `AudioConverterNew` with `mFormatID = kAudioFormatOpus`,
+  `mFramesPerPacket = 320`, feeding one packet at a time with an
+  `AudioStreamPacketDescription`. Verified 323/323 packets on macOS before
+  writing any app code. See `TideOpusDecoder.swift`.
+  (The C callback needs a stable allocated scratch buffer — handing it a Swift
+  `Data` trips exclusivity checking and crashes.)
+- Audio already flows through the existing import path: the manifest lists
+  `.opus`, the importer downloads every item and adds it to the album; only
+  the Photos-library save is skipped (Photos rejects audio). No transfer code
+  changes were needed to support audio.
+- Nothing in the app or either reference SDK sends a delete command. If media
+  vanishes from the glasses after a transfer, the firmware did it.
+
 ## AI voice feature (planned, not built)
 
-Goal: press-to-talk / wake trigger → glasses stream mic audio → AI answers,
-optionally seeing a photo the glasses send over BLE.
+Goal: single-click the back button → glasses enter AI listening → mic audio
+streams over BLE → AI answers, optionally seeing a photo the glasses send.
 
 Known-good references:
 - `/Users/aahishabbani/Projects/nisaetus/nisaetus/live_client.py` — working
@@ -82,11 +120,9 @@ Known-good references:
   `TouchControlReq` (cmd `0x3B`, `[01]` read / `[01, on]` set).
 
 Constraints:
-- The wake phrase lives in firmware; it cannot be renamed to "Hey Tide".
-  Options are the built-in phrase, a button trigger, or phone-side detection.
-- Leaving speech-recognition mode enabled previously broke the physical
-  shutter button (single press = photo, double = video). **Always stop the
-  mode when done.**
+- No custom wake word. The single-click AI trigger is firmware-provided and is
+  what the feature should hang off.
+- Decode incoming mic frames the same way as recordings (see above).
 
 Backend: OpenRouter model `openai/gpt-5.6-luna`, called from a Supabase edge
 function (project `kernel`, secret `Openrouter_Api_key`). The app should call
@@ -121,3 +157,25 @@ domain and parse `logs/Bluetooth/bluetoothd-hci-latest.pklg`.
 Mac-side BLE rig (test protocol without risking the app): Python venv with
 `bleak` in the session scratchpad; scripts drive the glasses directly from the
 Mac. Only one BLE central can connect at a time — quit the phone apps first.
+`brew install opus` + `pip install opuslib` gives a reference Opus decoder for
+checking captures. Useful scripts written so far: passive event watcher, mic
+capture → WAV, and protocol replays.
+
+Pull an imported file off the phone to inspect it:
+
+```bash
+xcrun devicectl device info files --device <id> \
+  --domain-type appDataContainer --domain-identifier com.aahish.Tide-Glasses
+xcrun devicectl device copy from --device <id> \
+  --domain-type appDataContainer --domain-identifier com.aahish.Tide-Glasses \
+  --source "Documents/TideAlbum/<file>" --destination ./<file>
+```
+
+## Harmless console noise
+
+`PointerUI`, `cannot add handler to 0 from 0`, `FigApplicationStateMonitor`,
+and `nw_connection_copy_… on unconnected nw_connection` are iOS framework
+chatter. `probe <ip> failed` is the app checking candidate IPs when not on the
+glasses Wi-Fi. Two of ours, both cosmetic: the Opus converter's
+"packet descriptions (0)" message while draining, and an AVAudioSession
+main-thread warning on play.
