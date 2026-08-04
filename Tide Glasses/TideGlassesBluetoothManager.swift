@@ -177,6 +177,12 @@ final class TideGlassesBluetoothManager: NSObject, ObservableObject {
         static let defaultWiFiPassword = "123456789"
     }
 
+    /// Read-only tap on every packet that passes its integrity check, in
+    /// arrival order. Additive by design: it is called before the existing
+    /// branches and must never alter them, so new features (the voice trigger)
+    /// can observe the stream without touching the transfer path.
+    var onPacket: ((UInt8, Data) -> Void)?
+
     override init() {
         super.init()
         central = CBCentralManager(delegate: self, queue: .main)
@@ -684,6 +690,8 @@ final class TideGlassesBluetoothManager: NSObject, ObservableObject {
             errorMessage = "Ignored a glasses response that failed its integrity check."
             return
         }
+
+        onPacket?(command, payload)
 
         if isPassiveProtocolTrace {
             print(

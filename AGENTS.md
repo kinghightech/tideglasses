@@ -63,16 +63,39 @@ Not working / known issues:
 - Firmware ends idle Wi-Fi sessions after ~40 s; a periodic IP query keeps it
   alive during transfers.
 
-## Physical buttons (measured 2026-08-03, supersedes earlier guesses)
+## Physical buttons (re-measured 2026-08-04 — CORRECTS the 08-03 entry)
 
-- **Back (black) button, held** → starts an audio recording on the glasses.
-- **Back button, single click** → puts the glasses into AI-listening mode.
-  This is the AI trigger. No wake word is needed and none can be renamed.
-- **Front (red) button**: 1 press photo, 2 presses video.
-- **The glasses never report button presses over BLE.** A passive capture of
-  all five notify/indicate channels during single/double/triple presses showed
-  zero press events — only the *result* (audio stream, media-count change).
-  So click-counting in the app is impossible; use what the firmware triggers.
+**The glasses DO report the back button over BLE.** The 2026-08-03 claim that
+they never do was wrong, and it was wrong because of a bug in the capture
+script, not because of the firmware. `button_watch.py` filtered on
+`NOISE_PREFIXES = (bytes([0xBC, 0x73, 0x02, 0x00]),)` — that is magic + cmd
+`0x73` + **length 2**, i.e. the frame *header*. It matched every two-byte
+`0x73` report regardless of payload, which is precisely where the button events
+live. The events were arriving the whole time and being dropped before print.
+
+Measured with `scratchpad/button_map.py` (no filtering, guided timing, and a
+red-button control to prove the capture was live):
+
+- **Back (black) button, single click** → this sequence, twice, identical:
+
+  | offset | frame | meaning |
+  | --- | --- | --- |
+  | `+0.00 s` | `0x73` payload `03 01` | microphone / listening ON |
+  | `+0.2 s → +4.95 s` | `0x59`, 40-byte Opus frames @ 20 ms | the utterance |
+  | `+4.98 s` | `0x73` payload `0a 01` | window closed |
+
+  Both windows measured 4.98 s start-to-end. **The firmware gives a fixed
+  ~5 s listening window with an explicit start and end marker**, so the app
+  needs no voice-activity detection — just buffer between `03 01` and `0a 01`.
+- `0x0A` is not in any reference enum; it is this firmware's end-of-window
+  event. `0x02 AI_RECOGNITION` was predicted and does **not** appear.
+- **Front (red) button** → `0x73` payload `01 01 00 00 00 01 00 01`
+  (media count). Used as the control; it fired, so the capture was verified
+  live and a silent result would have meant something.
+- Long-hold vs single-click could not be told apart in this capture — the same
+  `03 01` / `0a 01` pair appeared for what the wearer reported as single
+  clicks. Worth a second pass if the two ever need distinguishing, but it does
+  not block the AI feature: the trigger is the same either way.
 - Leaving speech-recognition mode enabled previously broke the front button.
   Always stop any mode that gets started.
 
@@ -85,6 +108,15 @@ Not working / known issues:
 - **Never trim trailing zero bytes from a frame.** The nisaetus reference does
   this; on this firmware the zeros are part of the fixed-size frame and
   trimming corrupts ~60% of them. Pass the 40-byte payload whole.
+- **Never de-duplicate consecutive identical frames** on the live BLE mic
+  stream. `scratchpad/audio_capture.py` drops a frame when it equals the one
+  before it, on the theory that BLE delivers some notifications twice. It does
+  not. Measured 2026-08-04: 477 frames arrived while the mic was open for
+  ~9.5 s wall-clock; 477 × 20 ms = 9.54 s, an exact match, and identical-payload
+  pairs have the same inter-arrival distribution as different-payload pairs
+  (median 29 ms both). Repeated payloads are real frames — near-silence encodes
+  to identical bytes. De-duplicating throws away 43% of the audio and yields
+  5.42 s for a 9.5 s recording. Same family of bug as the zero-trimming one.
 - **iOS decodes it with no third-party library**: AudioToolbox
   `AudioConverterNew` with `mFormatID = kAudioFormatOpus`,
   `mFramesPerPacket = 320`, feeding one packet at a time with an
@@ -99,10 +131,28 @@ Not working / known issues:
 - Nothing in the app or either reference SDK sends a delete command. If media
   vanishes from the glasses after a transfer, the firmware did it.
 
-## AI voice feature (planned, not built)
+## AI voice feature (backend + chat done; voice trigger next)
 
 Goal: single-click the back button → glasses enter AI listening → mic audio
 streams over BLE → AI answers, optionally seeing a photo the glasses send.
+
+**Done (2026-08-04):**
+- `tide-vision` edge function is live on the Kernel project
+  (`zwxmmkiwvhsjdztenwfy`). Reads secret `OPENROUTER_API_KEY`, model
+  `openai/gpt-5.6-luna`, `verify_jwt: false`, auth by an `x-tide-key` header
+  checked against a SHA-256 hash in its own source. Streams SSE, sets
+  `data_collection: "deny"` so no provider retains the wearer's photos, and its
+  system prompt is already written for short spoken answers.
+- `TideAIClient.swift` (SSE streaming + image downscaling to fit the 400 KB
+  cap), `TideConversation.swift` (thread state, reusable by the voice path),
+  `AIView.swift` (chat UI, attach from photo library or glasses album).
+  Verified on device: text, follow-up context, and vision all work.
+- `TideSecrets.swift` holds the device key and is **gitignored**.
+- The button trigger bytes are now known — see Physical buttons above.
+
+**Remaining:** subscribe to `0x73 03 01` / `0x73 0a 01`, buffer the `0x59`
+frames in between, decode with the existing `TideOpusDecoder`, transcribe, and
+send to the client above. Then decide where the spoken answer comes out.
 
 Known-good references:
 - `/Users/aahishabbani/Projects/nisaetus/nisaetus/live_client.py` — working

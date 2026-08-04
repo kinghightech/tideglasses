@@ -12,7 +12,8 @@ import SwiftUI
 
 struct AIView: View {
     @EnvironmentObject private var album: TideAlbumStore
-    @StateObject private var conversation = TideConversation()
+    @EnvironmentObject private var conversation: TideConversation
+    @EnvironmentObject private var voice: TideVoiceSession
 
     @State private var draft = ""
     @State private var attachment: UIImage?
@@ -33,6 +34,7 @@ struct AIView: View {
 
                 VStack(spacing: 0) {
                     transcript
+                    voiceBanner
                     composer
                 }
             }
@@ -131,13 +133,71 @@ struct AIView: View {
                 .font(.system(size: 19, weight: .semibold))
                 .foregroundStyle(Tide.primaryText)
 
-            Text("Attach a photo and it will tell you what it is looking at.")
+            Text("Click the back button on your glasses to talk, or type below. Attach a photo and it will tell you what it is looking at.")
                 .font(.system(size: 14))
                 .multilineTextAlignment(.center)
                 .foregroundStyle(Tide.secondaryText)
         }
         .padding(.horizontal, 36)
         .padding(.top, 70)
+    }
+
+    // MARK: - Voice
+
+    /// Shows what the back-button trigger is doing. Silent when idle, so the
+    /// screen stays a plain chat until the glasses have something to say.
+    @ViewBuilder
+    private var voiceBanner: some View {
+        if voice.phase != .idle || voice.errorText != nil {
+            HStack(spacing: 10) {
+                Image(systemName: voiceIcon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(voice.errorText != nil ? Tide.disconnected : Tide.accent)
+                    .symbolEffect(.pulse, isActive: voice.phase == .listening)
+
+                Text(voiceLabel)
+                    .font(.system(size: 14))
+                    .foregroundStyle(Tide.primaryText)
+
+                Spacer()
+
+                if voice.phase == .speaking {
+                    Button("Stop") { voice.stopSpeaking() }
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Tide.accent)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .cardSurface(cornerRadius: 16)
+            .frame(maxWidth: 760)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 6)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .animation(.easeOut(duration: 0.2), value: voice.phase)
+        }
+    }
+
+    private var voiceIcon: String {
+        if voice.errorText != nil { return "exclamationmark.triangle.fill" }
+        return switch voice.phase {
+        case .listening: "waveform"
+        case .pausing: "hand.tap.fill"
+        case .thinking: "ellipsis"
+        case .speaking: "speaker.wave.2.fill"
+        case .idle: "eyeglasses"
+        }
+    }
+
+    private var voiceLabel: String {
+        if let error = voice.errorText, voice.phase == .idle { return error }
+        return switch voice.phase {
+        case .listening: "Listening through your glasses…"
+        case .pausing: "Click again to keep talking"
+        case .thinking: voice.heardText.map { "“\($0)”" } ?? "Thinking…"
+        case .speaking: "Speaking"
+        case .idle: ""
+        }
     }
 
     // MARK: - Composer

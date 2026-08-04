@@ -29,7 +29,14 @@ enum TideOpusDecoder {
     /// Decodes the whole recording into a playable buffer, or nil if the file
     /// is not in this format.
     static func decode(url: URL) -> AVAudioPCMBuffer? {
-        guard let data = try? Data(contentsOf: url), data.count >= packetSize else { return nil }
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return decode(data: data)
+    }
+
+    /// Same decode for audio that never touched disk — the live BLE mic stream
+    /// arrives as these exact 40-byte packets on command 0x59.
+    static func decode(data: Data) -> AVAudioPCMBuffer? {
+        guard data.count >= packetSize else { return nil }
 
         let packets: [[UInt8]] = stride(from: 0, to: data.count - (packetSize - 1), by: packetSize)
             .map { [UInt8](data.subdata(in: $0..<($0 + packetSize))) }

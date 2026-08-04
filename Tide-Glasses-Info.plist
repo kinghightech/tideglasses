@@ -7,5 +7,15 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>UIBackgroundModes</key>
+	<array>
+		<!-- Keeps glasses notifications arriving while the app is backgrounded
+		     or the screen is locked, so the back button still works. -->
+		<string>bluetooth-central</string>
+		<!-- Lets the spoken answer play with the phone locked. -->
+		<string>audio</string>
+	</array>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Tide Glass turns what you say through your glasses into text on this iPhone. Recognition runs on-device — your voice is never sent to Apple.</string>
 </dict>
 </plist>
