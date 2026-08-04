@@ -41,6 +41,19 @@ enum TideTranscriptionError: LocalizedError {
 }
 
 struct TideSpeechTranscriber {
+    /// One recogniser for the life of the app.
+    ///
+    /// Building a new `SFSpeechRecognizer` per question makes iOS load the
+    /// on-device model again each time, which is seconds of dead air before a
+    /// single word is recognised. Held here so it stays warm.
+    private static let shared = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+
+    /// Loads the model ahead of the first question instead of during it.
+    static func prewarm() {
+        _ = shared
+        Task { _ = await requestAuthorization() }
+    }
+
     /// Asked for once, the first time the wearer uses the trigger.
     static func requestAuthorization() async -> Bool {
         if SFSpeechRecognizer.authorizationStatus() == .authorized { return true }
@@ -51,12 +64,17 @@ struct TideSpeechTranscriber {
         }
     }
 
-    func transcribe(_ buffer: AVAudioPCMBuffer) async throws -> String {
+    /// Transcribes an utterance. `onPartial` fires with the text so far, as it
+    /// is recognised — the camera trigger uses it to start the shutter without
+    /// waiting for the final result.
+    func transcribe(
+        _ buffer: AVAudioPCMBuffer,
+        onPartial: (@Sendable (String) -> Void)? = nil
+    ) async throws -> String {
         guard await Self.requestAuthorization() else {
             throw TideTranscriptionError.notAuthorized
         }
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
-              recognizer.isAvailable else {
+        guard let recognizer = Self.shared, recognizer.isAvailable else {
             throw TideTranscriptionError.recognizerUnavailable
         }
         guard recognizer.supportsOnDeviceRecognition else {
@@ -70,8 +88,11 @@ struct TideSpeechTranscriber {
 
         let request = SFSpeechURLRecognitionRequest(url: url)
         request.requiresOnDeviceRecognition = true
-        request.shouldReportPartialResults = false
+        // Partials cost nothing and let the caller act on words as they land
+        // rather than after the whole pass finishes.
+        request.shouldReportPartialResults = true
 
+        let started = Date()
         let text = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
             // recognitionTask can call back more than once; resume exactly once.
             let hasResumed = Resumed()
@@ -84,12 +105,21 @@ struct TideSpeechTranscriber {
                     }
                     return
                 }
-                guard let result, result.isFinal else { return }
+                guard let result else { return }
+                guard result.isFinal else {
+                    onPartial?(result.bestTranscription.formattedString)
+                    return
+                }
                 if hasResumed.claim() {
                     continuation.resume(returning: result.bestTranscription.formattedString)
                 }
             }
         }
+        TideDiagnostics.log(String(
+            format: "transcribed %.1fs of audio in %.2fs",
+            Double(buffer.frameLength) / buffer.format.sampleRate,
+            Date().timeIntervalSince(started)
+        ))
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw TideTranscriptionError.noSpeechFound }

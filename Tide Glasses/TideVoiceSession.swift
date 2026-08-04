@@ -72,6 +72,9 @@ final class TideVoiceSession: NSObject, ObservableObject {
     private var utterancesInFlight = 0
     private var isAnswerComplete = false
 
+    /// A capture started from a partial transcript, before recognition ended.
+    private var earlyCapture: Task<UIImage?, Never>?
+
     /// True once the audio route has been claimed. The session is then left
     /// active for the lifetime of the app — see `prepareAudioRoute()`.
     private var hasActivatedAudio = false
@@ -98,6 +101,8 @@ final class TideVoiceSession: NSObject, ObservableObject {
         self.camera = TideGlassesPhotoCapture(bluetooth: bluetooth)
         super.init()
         synthesizer.delegate = self
+        // Load the speech model now rather than during the first question.
+        TideSpeechTranscriber.prewarm()
     }
 
     // MARK: - Packet tap
@@ -224,16 +229,33 @@ final class TideVoiceSession: NSObject, ObservableObject {
             return
         }
 
+        // Start the shutter the moment the words "take a photo" are recognised,
+        // without waiting for the rest of the transcript. The glasses need
+        // ~2.3 s to expose and encode, so overlapping that with the tail of
+        // recognition is most of the wait gone.
+        earlyCapture = nil
         let question: String
         do {
-            question = try await transcriber.transcribe(pcm)
+            question = try await transcriber.transcribe(pcm) { [weak self] partial in
+                Task { @MainActor in self?.startEarlyCaptureIfAsked(partial) }
+            }
         } catch {
+            earlyCapture?.cancel()
+            earlyCapture = nil
             fail(error.localizedDescription)
             return
         }
 
         // A click during transcription starts a new question; abandon this one.
-        guard phase == .thinking else { return }
+        // Must accept .looking as well as .thinking — an early capture started
+        // from a partial transcript is very often still running at this point,
+        // and treating that as "someone interrupted" silently drops the whole
+        // question after the shutter has already fired.
+        guard isAnswering else {
+            earlyCapture?.cancel()
+            earlyCapture = nil
+            return
+        }
         heardText = question
 
         splitter = TideSentenceSplitter()
@@ -250,9 +272,16 @@ final class TideVoiceSession: NSObject, ObservableObject {
         let request = Self.visionRequest(in: question)
         var image: UIImage?
         if request.wantsPhoto, isVisionEnabled {
-            image = await captureForVision()
+            // Usually already running, started from a partial transcript.
+            let capture = earlyCapture ?? startCapture()
+            image = await capture.value
             guard isAnswering else { return }
+        } else {
+            // A partial misheard the trigger. The photo was never stored on the
+            // glasses and never leaves the phone.
+            earlyCapture?.cancel()
         }
+        earlyCapture = nil
 
         let answer = await conversation.send(
             request.question,
@@ -319,6 +348,22 @@ final class TideVoiceSession: NSObject, ObservableObject {
             .trimmingCharacters(in: CharacterSet(charactersIn: " ,.;:!?-—"))
             .isEmpty
         return (isBareCommand ? "What am I looking at?" : question, true)
+    }
+
+    /// Fires the shutter as soon as a partial transcript contains the trigger,
+    /// rather than after recognition finishes.
+    private func startEarlyCaptureIfAsked(_ partial: String) {
+        guard earlyCapture == nil, isVisionEnabled, isAnswering else { return }
+        guard Self.visionRequest(in: partial).wantsPhoto else { return }
+        earlyCapture = startCapture()
+    }
+
+    private func startCapture() -> Task<UIImage?, Never> {
+        let task = Task { [weak self] () -> UIImage? in
+            await self?.captureForVision() ?? nil
+        }
+        earlyCapture = task
+        return task
     }
 
     /// Pulls a photo because the wearer asked for one. A failed capture returns
