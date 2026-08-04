@@ -11,12 +11,10 @@
 //      0x59  payload <40 B>    Opus frames, one per 20 ms
 //      0x73  payload 0a 01     window closed  (~4.98 s after the start)
 //
-//  Five seconds is not a sentence. The window length belongs to the firmware,
-//  and the only way to extend it is to put the glasses into speech-recognition
-//  mode ourselves — a write that has previously left the front button broken.
-//  So instead consecutive windows are STITCHED: after one closes there is a
-//  short grace period, and another click inside it continues the same question
-//  rather than starting a new one. Talk, tap, keep talking, stop tapping.
+//  One click, one window, one question. An earlier version tried to stitch
+//  consecutive windows together to allow longer questions; it added a delay
+//  before every answer and was confusing to use, so it is gone. The firmware's
+//  rhythm is the app's rhythm.
 //
 //  Everything here hangs off the read-only `onPacket` tap on the BLE manager.
 //  No command is ever sent to the glasses, so the transfer path cannot be
@@ -33,8 +31,6 @@ final class TideVoiceSession: NSObject, ObservableObject {
     enum Phase: Equatable {
         case idle
         case listening
-        /// Window closed; waiting to see whether another click continues it.
-        case pausing
         case thinking
         case speaking
     }
@@ -52,21 +48,18 @@ final class TideVoiceSession: NSObject, ObservableObject {
 
     private var opusBuffer = Data()
     private var watchdog: Task<Void, Never>?
-    private var graceTimer: Task<Void, Never>?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
-    /// How long to wait after a window closes for another click to continue it.
-    private static let gracePeriod: Duration = .seconds(2)
+    /// True once the audio route has been claimed. The session is then left
+    /// active for the lifetime of the app — see `prepareAudioRoute()`.
+    private var hasActivatedAudio = false
 
     /// The firmware's window is ~5 s. If the closing event is ever lost, close
     /// it ourselves rather than buffering forever.
-    private static let windowLimit: Duration = .seconds(15)
+    private static let windowLimit: Duration = .seconds(12)
 
     /// Roughly a fifth of a second of audio. Shorter than this is a stray press.
     private static let minimumFrames = 10
-
-    /// One minute of stitched windows is already far past a spoken question.
-    private static let maximumFrames = 3_000
 
     private var isTriggerEnabled: Bool {
         UserDefaults.standard.object(forKey: "tide.voiceTrigger") as? Bool ?? true
@@ -76,14 +69,6 @@ final class TideVoiceSession: NSObject, ObservableObject {
         self.conversation = conversation
         super.init()
         synthesizer.delegate = self
-
-        // Set the category up front so activating it later — possibly while
-        // backgrounded, under time pressure — is just a flag flip.
-        try? AVAudioSession.sharedInstance().setCategory(
-            .playback,
-            mode: .spokenAudio,
-            options: [.duckOthers]
-        )
     }
 
     // MARK: - Packet tap
@@ -102,7 +87,7 @@ final class TideVoiceSession: NSObject, ObservableObject {
             // part of the fixed 40-byte frame) and no de-duplication (repeated
             // payloads are real frames). Both mistakes are documented in
             // AGENTS.md because both have already cost us a debugging session.
-            guard phase == .listening, capturedFrames < Self.maximumFrames else { return }
+            guard phase == .listening else { return }
             opusBuffer.append(payload)
             capturedFrames += 1
 
@@ -110,9 +95,9 @@ final class TideVoiceSession: NSObject, ObservableObject {
             guard payload.count >= 2 else { return }
             switch payload[0] {
             case Event.microphone where payload[1] == 0x01:
-                openWindow()
+                beginListening()
             case Event.microphone, Event.windowClosed:
-                pauseWindow()
+                finishListening()
             default:
                 break
             }
@@ -124,63 +109,34 @@ final class TideVoiceSession: NSObject, ObservableObject {
 
     // MARK: - Listening
 
-    private func openWindow() {
+    private func beginListening() {
         guard isTriggerEnabled else { return }
+        guard phase != .listening else { return }
 
-        switch phase {
-        case .pausing:
-            // A click inside the grace period continues the same question.
-            graceTimer?.cancel()
-            graceTimer = nil
-            phase = .listening
-            startWatchdog()
-
-        case .idle, .speaking:
-            // Interrupting playback means "never mind, listen to me instead".
-            if synthesizer.isSpeaking {
-                synthesizer.stopSpeaking(at: .immediate)
-            }
-            beginBackgroundAssertion()
-            opusBuffer = Data()
-            capturedFrames = 0
-            heardText = nil
-            errorText = nil
-            phase = .listening
-            startWatchdog()
-
-        case .listening, .thinking:
-            break
+        // Interrupting playback means "never mind, listen to me instead".
+        if synthesizer.isSpeaking {
+            synthesizer.stopSpeaking(at: .immediate)
         }
-    }
 
-    /// The firmware closed its window. Hold the audio briefly in case another
-    /// click continues the sentence.
-    private func pauseWindow() {
-        guard phase == .listening else { return }
+        beginBackgroundAssertion()
+        opusBuffer = Data()
+        capturedFrames = 0
+        heardText = nil
+        errorText = nil
+        phase = .listening
+
         watchdog?.cancel()
-        watchdog = nil
-        phase = .pausing
-
-        graceTimer?.cancel()
-        graceTimer = Task { [weak self] in
-            try? await Task.sleep(for: Self.gracePeriod)
+        watchdog = Task { [weak self] in
+            try? await Task.sleep(for: Self.windowLimit)
             guard !Task.isCancelled else { return }
             self?.finishListening()
         }
     }
 
-    private func startWatchdog() {
-        watchdog?.cancel()
-        watchdog = Task { [weak self] in
-            try? await Task.sleep(for: Self.windowLimit)
-            guard !Task.isCancelled else { return }
-            self?.pauseWindow()
-        }
-    }
-
     private func finishListening() {
-        guard phase == .pausing else { return }
-        graceTimer = nil
+        guard phase == .listening else { return }
+        watchdog?.cancel()
+        watchdog = nil
 
         let captured = opusBuffer
         opusBuffer = Data()
@@ -221,30 +177,46 @@ final class TideVoiceSession: NSObject, ObservableObject {
         speak(answer)
     }
 
+    /// Failures are shown, never spoken. Talking at someone because a
+    /// transcription came back empty is worse than saying nothing.
     private func fail(_ message: String) {
         errorText = message
-        speak(message)
+        settle()
     }
 
-    /// Back to rest, releasing the background assertion and audio route.
     private func settle() {
         phase = .idle
         watchdog?.cancel()
         watchdog = nil
-        graceTimer?.cancel()
-        graceTimer = nil
-        try? AVAudioSession.sharedInstance()
-            .setActive(false, options: .notifyOthersOnDeactivation)
         endBackgroundAssertion()
     }
 
     // MARK: - Speaking
 
+    /// Claims the audio route once and keeps it.
+    ///
+    /// Activating and then deactivating the session around every answer makes
+    /// iOS acquire and release the route each time — and a pair of Bluetooth
+    /// glasses chimes on each acquisition. One activation per app launch, never
+    /// deactivated, keeps it silent. `.mixWithOthers` means holding it does not
+    /// stop anything else the phone is playing.
+    private func prepareAudioRoute() {
+        guard !hasActivatedAudio else { return }
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(
+            .playback,
+            mode: .spokenAudio,
+            options: [.mixWithOthers, .duckOthers]
+        )
+        try? session.setActive(true)
+        hasActivatedAudio = true
+    }
+
     /// Routes to whatever output is active — if the glasses are paired as a
     /// Bluetooth audio device, the answer comes out of the glasses. The `audio`
     /// background mode is what lets this play with the screen locked.
     private func speak(_ text: String) {
-        try? AVAudioSession.sharedInstance().setActive(true)
+        prepareAudioRoute()
 
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")

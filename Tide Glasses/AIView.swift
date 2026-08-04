@@ -182,7 +182,6 @@ struct AIView: View {
         if voice.errorText != nil { return "exclamationmark.triangle.fill" }
         return switch voice.phase {
         case .listening: "waveform"
-        case .pausing: "hand.tap.fill"
         case .thinking: "ellipsis"
         case .speaking: "speaker.wave.2.fill"
         case .idle: "eyeglasses"
@@ -193,7 +192,6 @@ struct AIView: View {
         if let error = voice.errorText, voice.phase == .idle { return error }
         return switch voice.phase {
         case .listening: "Listening through your glasses…"
-        case .pausing: "Click again to keep talking"
         case .thinking: voice.heardText.map { "“\($0)”" } ?? "Thinking…"
         case .speaking: "Speaking"
         case .idle: ""
