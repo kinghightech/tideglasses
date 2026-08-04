@@ -56,6 +56,13 @@ final class TideVoiceSession: NSObject, ObservableObject {
     private var graceTimer: Task<Void, Never>?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
+    /// Answer-in-progress state. `AVSpeechSynthesizer` queues utterances
+    /// itself, so sentences can be handed over as they arrive; the count is
+    /// what tells us when the last one has actually finished playing.
+    private var splitter = TideSentenceSplitter()
+    private var utterancesInFlight = 0
+    private var isAnswerComplete = false
+
     /// True once the audio route has been claimed. The session is then left
     /// active for the lifetime of the app — see `prepareAudioRoute()`.
     private var hasActivatedAudio = false
@@ -143,6 +150,9 @@ final class TideVoiceSession: NSObject, ObservableObject {
             capturedFrames = 0
             heardText = nil
             errorText = nil
+            // Anything queued for the previous answer was just cancelled.
+            utterancesInFlight = 0
+            isAnswerComplete = false
             phase = .listening
             startWatchdog()
 
@@ -210,13 +220,38 @@ final class TideVoiceSession: NSObject, ObservableObject {
         guard phase == .thinking else { return }
         heardText = question
 
-        guard let answer = await conversation.send(question, image: nil).value else {
-            // The conversation already shows the failure in the transcript.
-            settle()
-            return
+        splitter = TideSentenceSplitter()
+        utterancesInFlight = 0
+        isAnswerComplete = false
+
+        // Speak each sentence the moment it is complete, rather than waiting
+        // for the whole answer. The model streams, so this is most of a second
+        // off the time to the first spoken word.
+        let answer = await conversation.send(question, image: nil) { [weak self] fragment in
+            guard let self, self.isAnswering else { return }
+            for sentence in self.splitter.feed(fragment) {
+                self.speak(sentence)
+            }
+        }.value
+
+        guard isAnswering else { return }
+
+        if answer != nil, let remainder = splitter.flush() {
+            speak(remainder)
         }
-        guard phase == .thinking else { return }
-        speak(answer)
+        isAnswerComplete = true
+
+        // Nothing was ever queued — an empty or failed answer. The conversation
+        // already shows the failure in the transcript.
+        if utterancesInFlight == 0 {
+            settle()
+        }
+    }
+
+    /// True while this answer still owns the session. A new click flips the
+    /// phase and everything in flight for the old question is dropped.
+    private var isAnswering: Bool {
+        phase == .thinking || phase == .speaking
     }
 
     /// Failures are shown, never spoken. Talking at someone because a
@@ -232,6 +267,8 @@ final class TideVoiceSession: NSObject, ObservableObject {
         watchdog = nil
         graceTimer?.cancel()
         graceTimer = nil
+        utterancesInFlight = 0
+        isAnswerComplete = false
         endBackgroundAssertion()
     }
 
@@ -256,17 +293,28 @@ final class TideVoiceSession: NSObject, ObservableObject {
         hasActivatedAudio = true
     }
 
-    /// Routes to whatever output is active — if the glasses are paired as a
-    /// Bluetooth audio device, the answer comes out of the glasses. The `audio`
-    /// background mode is what lets this play with the screen locked.
+    /// Queues one sentence. Routes to whatever output is active — if the
+    /// glasses are paired as a Bluetooth audio device, the answer comes out of
+    /// the glasses. The `audio` background mode is what lets this play with the
+    /// screen locked.
     private func speak(_ text: String) {
         prepareAudioRoute()
 
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utterance.voice = TideVoiceCatalog.resolved()
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        utterancesInFlight += 1
         phase = .speaking
         synthesizer.speak(utterance)
+    }
+
+    /// Called as each queued sentence finishes or is cancelled. The answer is
+    /// only over when the stream has ended *and* nothing is still playing —
+    /// speech regularly outruns the model, so either one alone is wrong.
+    private func utteranceEnded() {
+        utterancesInFlight = max(0, utterancesInFlight - 1)
+        guard isAnswerComplete, utterancesInFlight == 0, phase == .speaking else { return }
+        settle()
     }
 
     func stopSpeaking() {
@@ -313,8 +361,7 @@ extension TideVoiceSession: AVSpeechSynthesizerDelegate {
         didFinish utterance: AVSpeechUtterance
     ) {
         Task { @MainActor [weak self] in
-            guard let self, self.phase == .speaking else { return }
-            self.settle()
+            self?.utteranceEnded()
         }
     }
 
@@ -324,9 +371,8 @@ extension TideVoiceSession: AVSpeechSynthesizerDelegate {
     ) {
         Task { @MainActor [weak self] in
             // A cancel caused by a new click must not tear down the session
-            // that click just started.
-            guard let self, self.phase == .speaking else { return }
-            self.settle()
+            // that click just started — `utteranceEnded` checks the phase.
+            self?.utteranceEnded()
         }
     }
 }

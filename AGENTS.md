@@ -150,9 +150,53 @@ streams over BLE → AI answers, optionally seeing a photo the glasses send.
 - `TideSecrets.swift` holds the device key and is **gitignored**.
 - The button trigger bytes are now known — see Physical buttons above.
 
-**Remaining:** subscribe to `0x73 03 01` / `0x73 0a 01`, buffer the `0x59`
-frames in between, decode with the existing `TideOpusDecoder`, transcribe, and
-send to the client above. Then decide where the spoken answer comes out.
+**Voice trigger — built and working (2026-08-04).** `TideVoiceSession.swift`
+watches for `0x73 03 01`, buffers the `0x59` frames, and closes on
+`0x73 0a 01`. Decodes with `TideOpusDecoder.decode(data:)`, transcribes with
+`TideSpeechTranscriber`, asks through `TideConversation`, speaks the answer.
+
+Design decisions that were paid for in testing — do not undo casually:
+
+- **One line touches the BLE manager**: `onPacket?(command, payload)` in
+  `processPacket`, a read-only tap placed before every existing branch. The
+  voice session never sends a command to the glasses, so the extended listening
+  that speech-recognition mode (`0x41 [02 01 07]`) would allow is deliberately
+  NOT used — that mode has broken the front button before.
+- **Window stitching**: the firmware's window is a fixed ~5 s, which is not a
+  sentence. After it closes there is a **1 second** grace period; another click
+  inside it continues the same question instead of starting a new one. Two
+  seconds felt laggy; one is what the wearer chose. Audio spoken during the gap
+  between windows is lost — that is inherent, not a bug.
+- **Audio session is activated once per app launch and never deactivated**
+  (`prepareAudioRoute`). Toggling it around each answer makes iOS re-acquire
+  the Bluetooth route and the glasses chime every single time. Do not add a
+  `setActive(false)` back.
+- **Errors are displayed, never spoken.** Speaking them meant the glasses
+  talked at the wearer every time a transcription came back empty.
+- **Transcription is on-device only** (`requiresOnDeviceRecognition = true`).
+  Letting it fall back to Apple's servers would ship the wearer's voice off the
+  phone, which is the thing this app exists to avoid. If offline recognition is
+  missing it fails with instructions instead.
+- **Background**: `UIBackgroundModes` = `bluetooth-central` + `audio` in
+  `Tide-Glasses-Info.plist`, plus a `beginBackgroundTask` assertion held from
+  the click until the answer finishes. Without the assertion iOS suspends the
+  app in the seconds between the last audio frame and the spoken reply.
+  Verified working with the screen locked. **Not** covered: if iOS terminates
+  the app outright, the button does nothing — that would need CoreBluetooth
+  state restoration, which means changing how the central manager is built.
+- **TTS voice**: `TideVoiceCatalog` ranks installed English voices
+  Premium → Enhanced → Standard. `AVSpeechSynthesisVoice(language:)` returns
+  the compact robotic voice and should never be used directly. Settings has a
+  picker; empty preference means "track the best installed". Apple renamed the
+  download screen in iOS 26: **Settings → Accessibility → Read & Speak →
+  Voices** (was "Spoken Content"). Siri's own voice is not available to
+  third-party apps. Currently using Evan (Enhanced).
+
+**Known remaining work:** the answer is spoken only after the full model
+response arrives; speaking sentence-by-sentence as the stream lands would cut
+about a second off time-to-first-word. The BLE vision path (glasses push a
+photo during an AI query, cmd `0xFD` thumbnails) is not wired up — the chat tab
+can attach photos, but the voice path always sends text only.
 
 Known-good references:
 - `/Users/aahishabbani/Projects/nisaetus/nisaetus/live_client.py` — working

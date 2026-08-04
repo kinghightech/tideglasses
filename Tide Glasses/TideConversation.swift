@@ -43,8 +43,16 @@ final class TideConversation: ObservableObject {
 
     /// The returned task yields the finished answer, or nil if it failed.
     /// Typing callers ignore it; the voice path awaits it so it can speak.
+    ///
+    /// `onFragment` receives each piece of the answer as it streams in, which
+    /// is how the voice path starts speaking the first sentence before the
+    /// model has written the last one.
     @discardableResult
-    func send(_ question: String, image: UIImage?) -> Task<String?, Never> {
+    func send(
+        _ question: String,
+        image: UIImage?,
+        onFragment: (@MainActor (String) -> Void)? = nil
+    ) -> Task<String?, Never> {
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || image != nil else {
             return Task { nil }
@@ -56,7 +64,7 @@ final class TideConversation: ObservableObject {
         messages.append(TideAIMessage(role: .user, text: prompt, image: image))
         lastPrompt = prompt
         lastImage = image
-        return startStream(prompt: prompt, image: image)
+        return startStream(prompt: prompt, image: image, onFragment: onFragment)
     }
 
     @discardableResult
@@ -88,7 +96,11 @@ final class TideConversation: ObservableObject {
 
     // MARK: - Streaming
 
-    private func startStream(prompt: String, image: UIImage?) -> Task<String?, Never> {
+    private func startStream(
+        prompt: String,
+        image: UIImage?,
+        onFragment: (@MainActor (String) -> Void)? = nil
+    ) -> Task<String?, Never> {
         let history = historyForRequest()
         messages.append(TideAIMessage(role: .assistant, text: ""))
         isStreaming = true
@@ -102,6 +114,7 @@ final class TideConversation: ObservableObject {
                     history: history
                 ) {
                     self.append(fragment)
+                    onFragment?(fragment)
                 }
                 return self.finish()
             } catch {
