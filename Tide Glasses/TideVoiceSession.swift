@@ -37,6 +37,8 @@ final class TideVoiceSession: NSObject, ObservableObject {
         /// Window closed; waiting to see whether another click continues it.
         case pausing
         case thinking
+        /// The model asked to see; a photo is being pulled off the glasses.
+        case looking
         case speaking
     }
 
@@ -168,7 +170,9 @@ final class TideVoiceSession: NSObject, ObservableObject {
             phase = .listening
             startWatchdog()
 
-        case .listening, .thinking:
+        // Mid-answer already: a photo pull is in flight and interrupting it
+        // would leave the camera half-read. Let it finish.
+        case .listening, .thinking, .looking:
             break
         }
     }
@@ -220,35 +224,17 @@ final class TideVoiceSession: NSObject, ObservableObject {
             return
         }
 
-        // Start the camera immediately and transcribe at the same time. The
-        // pull takes a couple of seconds; running it alongside transcription
-        // hides most of that. It is started only now, never during listening —
-        // AI-photo mode and speech-recognition mode conflict on this firmware.
-        let photo: Task<UIImage?, Never>? = isVisionEnabled
-            ? Task { [camera] in try? await camera.captureImage() }
-            : nil
-
         let question: String
         do {
             question = try await transcriber.transcribe(pcm)
         } catch {
-            photo?.cancel()
             fail(error.localizedDescription)
             return
         }
 
         // A click during transcription starts a new question; abandon this one.
-        guard phase == .thinking else {
-            photo?.cancel()
-            return
-        }
-        heardText = question
-
-        // A failed capture is not a failed question — send it without the
-        // photo rather than refusing to answer.
-        let image = await photo?.value
-
         guard phase == .thinking else { return }
+        heardText = question
 
         splitter = TideSentenceSplitter()
         utterancesInFlight = 0
@@ -257,7 +243,21 @@ final class TideVoiceSession: NSObject, ObservableObject {
         // Speak each sentence the moment it is complete, rather than waiting
         // for the whole answer. The model streams, so this is most of a second
         // off the time to the first spoken word.
-        let answer = await conversation.send(question, image: image) { [weak self] fragment in
+        // The camera fires only when the wearer asks for it out loud. Letting
+        // the model decide instead cost an extra round trip on exactly the
+        // slowest questions, and misjudged real phrasings — this is faster and
+        // predictable, and no photo is ever taken without being asked for.
+        let request = Self.visionRequest(in: question)
+        var image: UIImage?
+        if request.wantsPhoto, isVisionEnabled {
+            image = await captureForVision()
+            guard isAnswering else { return }
+        }
+
+        let answer = await conversation.send(
+            request.question,
+            image: image
+        ) { [weak self] fragment in
             guard let self, self.isAnswering else { return }
             for sentence in self.splitter.feed(fragment) {
                 self.speak(sentence)
@@ -281,7 +281,54 @@ final class TideVoiceSession: NSObject, ObservableObject {
     /// True while this answer still owns the session. A new click flips the
     /// phase and everything in flight for the old question is dropped.
     private var isAnswering: Bool {
-        phase == .thinking || phase == .speaking
+        phase == .thinking || phase == .looking || phase == .speaking
+    }
+
+    // MARK: - Asking for a photo
+
+    /// Spoken phrases that mean "look at this". Matched anywhere in the
+    /// question — dictation puts them at either end depending on how the
+    /// sentence ran — and removed before sending, so the model receives the
+    /// question rather than the instruction.
+    private static let visionTriggers = [
+        "take a photo", "take a picture", "take photo", "take picture",
+        "take a look", "have a look", "look at this", "look at that",
+    ]
+
+    /// Decides whether to look first, and what to actually ask.
+    ///
+    /// The trigger phrase is deliberately left in the question. Cutting it out
+    /// mangles ordinary sentences — "take a photo of this plant" becomes
+    /// "plant", "take a look at this and tell me what it says" loses its
+    /// subject — and the model simply ignores the instruction once a photo is
+    /// attached. Only a bare command is rewritten, since "take a photo" alone
+    /// is not a question.
+    static func visionRequest(in question: String) -> (question: String, wantsPhoto: Bool) {
+        var remainder = question
+        var wantsPhoto = false
+
+        for trigger in visionTriggers {
+            while let range = remainder.range(of: trigger, options: .caseInsensitive) {
+                remainder.removeSubrange(range)
+                wantsPhoto = true
+            }
+        }
+        guard wantsPhoto else { return (question, false) }
+
+        let isBareCommand = remainder
+            .trimmingCharacters(in: CharacterSet(charactersIn: " ,.;:!?-—"))
+            .isEmpty
+        return (isBareCommand ? "What am I looking at?" : question, true)
+    }
+
+    /// Pulls a photo because the wearer asked for one. A failed capture returns
+    /// nil rather than throwing — an unanswerable question is worse than an
+    /// answer given without the picture.
+    private func captureForVision() async -> UIImage? {
+        phase = .looking
+        let image = try? await camera.captureImage()
+        if phase == .looking { phase = .thinking }
+        return image
     }
 
     /// Failures are shown, never spoken. Talking at someone because a

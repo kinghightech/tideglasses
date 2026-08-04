@@ -184,6 +184,7 @@ struct AIView: View {
         case .listening: "waveform"
         case .pausing: "hand.tap.fill"
         case .thinking: "ellipsis"
+        case .looking: "camera.fill"
         case .speaking: "speaker.wave.2.fill"
         case .idle: "eyeglasses"
         }
@@ -194,6 +195,7 @@ struct AIView: View {
         return switch voice.phase {
         case .listening: "Listening through your glasses…"
         case .pausing: "Click again to keep talking"
+        case .looking: "Taking a look…"
         case .thinking: voice.heardText.map { "“\($0)”" } ?? "Thinking…"
         case .speaking: "Speaking"
         case .idle: ""

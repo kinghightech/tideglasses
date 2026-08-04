@@ -175,6 +175,9 @@ final class TideGlassesBluetoothManager: NSObject, ObservableObject {
         static let transferMode: UInt8 = 0x04
         static let transferStopMode: UInt8 = 0x09
         static let defaultWiFiPassword = "123456789"
+        /// Largest real packet is a ~1 KB photo chunk; anything beyond this is
+        /// a corrupt length field, not a big message.
+        static let maximumPacketBytes = 4096
     }
 
     /// Read-only tap on every packet that passes its integrity check, in
@@ -664,11 +667,26 @@ final class TideGlassesBluetoothManager: NSObject, ObservableObject {
     }
 
     private func handleSerialNotification(_ data: Data) {
-        if data.first == ProtocolValue.magic {
+        // A packet bigger than one BLE notification arrives in fragments: the
+        // 0xFD photo chunks are ~1 KB and take about five each. A continuation
+        // fragment can begin with 0xBC purely by coincidence — JPEG bytes are
+        // arbitrary — and treating that as the start of a new packet discards
+        // the half-assembled chunk and wedges the reader. At ~108 continuation
+        // fragments per photo that lost roughly a third of all captures.
+        //
+        // So 0xBC only starts a packet when no packet is already in flight.
+        // Single-notification packets, which is everything the transfer path
+        // exchanges, behave exactly as before.
+        if receiveBuffer.isEmpty {
+            guard data.first == ProtocolValue.magic else { return }
             receiveBuffer = data
-        } else if !receiveBuffer.isEmpty {
-            receiveBuffer.append(data)
         } else {
+            receiveBuffer.append(data)
+        }
+
+        // A corrupted length field must never wedge the channel for good.
+        if receiveBuffer.count > ProtocolValue.maximumPacketBytes {
+            receiveBuffer = Data()
             return
         }
 
