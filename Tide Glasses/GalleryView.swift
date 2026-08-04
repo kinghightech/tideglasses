@@ -15,9 +15,11 @@ struct GalleryView: View {
     @EnvironmentObject private var album: TideAlbumStore
     @Environment(\.scenePhase) private var scenePhase
 
+    @StateObject private var audioPlayer = TideAudioPlayer()
     @State private var isSelecting = false
     @State private var selectedIDs = Set<String>()
     @State private var viewerStart: ViewerStart?
+    @State private var audioEntry: TideAlbumStore.Entry?
 
     private let columns = [
         GridItem(.adaptive(minimum: 110), spacing: 3)
@@ -74,6 +76,9 @@ struct GalleryView: View {
             }
             .fullScreenCover(item: $viewerStart) { start in
                 MediaViewer(entries: viewableEntries, startIndex: start.index)
+            }
+            .sheet(item: $audioEntry) { entry in
+                AudioPlaybackSheet(entry: entry, player: audioPlayer)
             }
         }
     }
@@ -206,7 +211,8 @@ struct GalleryView: View {
                         AlbumTile(
                             entry: entry,
                             isSelecting: isSelecting,
-                            isSelected: selectedIDs.contains(entry.id)
+                            isSelected: selectedIDs.contains(entry.id),
+                            isPlaying: audioPlayer.isPlaying(entry.id)
                         )
                         .onTapGesture {
                             handleTap(entry)
@@ -224,6 +230,10 @@ struct GalleryView: View {
             } else {
                 selectedIDs.insert(entry.id)
             }
+            return
+        }
+        if entry.kind == .audio {
+            audioEntry = entry
             return
         }
         guard let index = viewableEntries.firstIndex(where: { $0.id == entry.id }) else {
@@ -252,6 +262,7 @@ private struct AlbumTile: View {
     let entry: TideAlbumStore.Entry
     let isSelecting: Bool
     let isSelected: Bool
+    var isPlaying: Bool = false
     @State private var thumbnail: UIImage?
 
     var body: some View {
@@ -279,6 +290,12 @@ private struct AlbumTile: View {
                         .foregroundStyle(.white)
                         .shadow(radius: 2)
                         .padding(6)
+                } else if entry.kind == .audio {
+                    Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.white)
+                        .shadow(radius: 3)
+                        .padding(6)
                 }
             }
             .overlay(alignment: .topTrailing) {
@@ -301,7 +318,7 @@ private struct AlbumTile: View {
     private var placeholderSymbol: String {
         switch entry.kind {
         case .video: "video.fill"
-        case .audio: "waveform"
+        case .audio: isPlaying ? "waveform.circle.fill" : "waveform"
         default: "photo"
         }
     }
