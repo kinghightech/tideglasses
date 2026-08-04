@@ -183,6 +183,18 @@ final class TideGlassesBluetoothManager: NSObject, ObservableObject {
     /// can observe the stream without touching the transfer path.
     var onPacket: ((UInt8, Data) -> Void)?
 
+    /// Sends one framed command on behalf of the AI vision path.
+    ///
+    /// A thin pass-through to the existing writer — it adds no state and keeps
+    /// no session. The guard is the point: a photo pull must never interleave
+    /// with a Wi-Fi transfer negotiation, which is the fragile part of this
+    /// file. Everything else in the AI feature is read-only.
+    @discardableResult
+    func sendVisionCommand(command: UInt8, payload: Data) -> Bool {
+        guard !isRequestingWiFiTransfer else { return false }
+        return sendFramedCommand(command: command, payload: payload)
+    }
+
     override init() {
         super.init()
         central = CBCentralManager(delegate: self, queue: .main)

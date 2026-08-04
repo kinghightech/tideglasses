@@ -12,6 +12,7 @@ struct SettingsView: View {
     @AppStorage("tide.ownerName") private var ownerName = ""
     @AppStorage("tide.autoConnect") private var autoConnect = true
     @AppStorage("tide.voiceTrigger") private var voiceTrigger = true
+    @AppStorage("tide.voiceVision") private var voiceVision = true
     @AppStorage(TideVoiceCatalog.preferenceKey) private var voiceIdentifier = ""
 
     @State private var previewSynthesizer = AVSpeechSynthesizer()
@@ -66,6 +67,16 @@ struct SettingsView: View {
                                     .labelsHidden()
                                     .tint(Tide.accent)
                             }
+                            Divider().overlay(Tide.hairline)
+                            LabeledRow(title: "Send a photo with questions") {
+                                Toggle("", isOn: $voiceVision)
+                                    .labelsHidden()
+                                    .tint(Tide.accent)
+                            }
+                            Text("Lets Tide see what you are looking at. Adds a couple of seconds to each answer.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(Tide.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
                             Divider().overlay(Tide.hairline)
                             LabeledRow(title: "Voice") {
                                 Picker("", selection: $voiceIdentifier) {

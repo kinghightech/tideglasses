@@ -192,11 +192,44 @@ Design decisions that were paid for in testing — do not undo casually:
   Voices** (was "Spoken Content"). Siri's own voice is not available to
   third-party apps. Currently using Evan (Enhanced).
 
-**Known remaining work:** the answer is spoken only after the full model
-response arrives; speaking sentence-by-sentence as the stream lands would cut
-about a second off time-to-first-word. The BLE vision path (glasses push a
-photo during an AI query, cmd `0xFD` thumbnails) is not wired up — the chat tab
-can attach photos, but the voice path always sends text only.
+## Photo over BLE (measured 2026-08-04, fully proven end to end)
+
+A complete 512x384 JPEG can be pulled off the glasses over BLE in ~2 seconds.
+The image is **pulled, never pushed** — taking the photo returns only an ack;
+nothing arrives until it is requested.
+
+```
+TX  0x41 [02 01 06 02 02 02]         take a fresh AI photo
+RX  0x41 [02 01 06 ff ff]            ack
+RX  0x73 [02 00 NN 01 00]            ready; NN = chunk count
+
+TX  0xFD [02 idxLo idxHi]            request chunk idx
+RX  0xFD [01 cntLo cntHi idxLo idxHi] + body
+```
+
+- **The request index is LE16 at byte OFFSET 1.** Byte 0 is a type prefix and
+  is ignored. Proven by elimination: `01 00` returns chunk 0 while `00 01`
+  returns chunk 1 — so the index cannot be at offset 0. An empty payload, or
+  any 1-byte payload, returns chunk 0.
+- Response header is 5 bytes: status `01`, chunk count LE16, chunk index LE16.
+  **Trust the 0xFD header for the count, not the 0x73 report** — they have
+  disagreed.
+- Body is 1013 bytes per chunk except the last, which is short (measured 632).
+  Concatenate bodies in index order; the result starts `FF D8 FF` and ends
+  `FF D9`. Measured 22 chunks, 21905 bytes, 512x384.
+- Chunks arrive ~60-90 ms apart. One transient stall was seen at chunk 20 of a
+  22-chunk pull; a retry absorbed it. **Retry individual chunks** — do not
+  restart the whole capture.
+- **nisaetus is wrong here.** `capture_and_get_thumbnail` reads one packet,
+  finds `FF D8`, and returns it — that is 1/22nd of the image, the top ~5%.
+  Same class of bug as its zero-trimming and frame-dedup mistakes.
+- AI-photo mode conflicts with speech-recognition mode. The voice flow is
+  naturally sequential (mic window closes, *then* capture), so they never
+  overlap. Never start a capture while `0x73 03 01` is open.
+
+**Known remaining work:** the BLE vision path is proven on the Mac rig but not
+yet wired into the app — the chat tab can attach photos, but the voice path
+still sends text only.
 
 Known-good references:
 - `/Users/aahishabbani/Projects/nisaetus/nisaetus/live_client.py` — working

@@ -19,7 +19,7 @@ struct Tide_GlassesApp: App {
         let glasses = TideGlassesBluetoothManager()
         let album = TideAlbumStore()
         let conversation = TideConversation()
-        let voice = TideVoiceSession(conversation: conversation)
+        let voice = TideVoiceSession(conversation: conversation, bluetooth: glasses)
 
         _glasses = StateObject(wrappedValue: glasses)
         _album = StateObject(wrappedValue: album)

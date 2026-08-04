@@ -50,6 +50,13 @@ final class TideVoiceSession: NSObject, ObservableObject {
     private let conversation: TideConversation
     private let transcriber = TideSpeechTranscriber()
     private let synthesizer = AVSpeechSynthesizer()
+    private let camera: TideGlassesPhotoCapture
+
+    /// Whether to send a photo with spoken questions, so the assistant can see
+    /// what the wearer is looking at. Costs a couple of seconds per question.
+    private var isVisionEnabled: Bool {
+        UserDefaults.standard.object(forKey: "tide.voiceVision") as? Bool ?? true
+    }
 
     private var opusBuffer = Data()
     private var watchdog: Task<Void, Never>?
@@ -84,8 +91,9 @@ final class TideVoiceSession: NSObject, ObservableObject {
         UserDefaults.standard.object(forKey: "tide.voiceTrigger") as? Bool ?? true
     }
 
-    init(conversation: TideConversation) {
+    init(conversation: TideConversation, bluetooth: TideGlassesBluetoothManager) {
         self.conversation = conversation
+        self.camera = TideGlassesPhotoCapture(bluetooth: bluetooth)
         super.init()
         synthesizer.delegate = self
     }
@@ -100,6 +108,10 @@ final class TideVoiceSession: NSObject, ObservableObject {
     }
 
     private func handle(command: UInt8, payload: Data) {
+        // The camera reads the same stream. It ignores everything that is not
+        // part of a capture it started.
+        camera.handle(command: command, payload: payload)
+
         switch command {
         case Frame.audio:
             // Append the payload whole: no trailing-zero trim (the zeros are
@@ -208,17 +220,35 @@ final class TideVoiceSession: NSObject, ObservableObject {
             return
         }
 
+        // Start the camera immediately and transcribe at the same time. The
+        // pull takes a couple of seconds; running it alongside transcription
+        // hides most of that. It is started only now, never during listening —
+        // AI-photo mode and speech-recognition mode conflict on this firmware.
+        let photo: Task<UIImage?, Never>? = isVisionEnabled
+            ? Task { [camera] in try? await camera.captureImage() }
+            : nil
+
         let question: String
         do {
             question = try await transcriber.transcribe(pcm)
         } catch {
+            photo?.cancel()
             fail(error.localizedDescription)
             return
         }
 
         // A click during transcription starts a new question; abandon this one.
-        guard phase == .thinking else { return }
+        guard phase == .thinking else {
+            photo?.cancel()
+            return
+        }
         heardText = question
+
+        // A failed capture is not a failed question — send it without the
+        // photo rather than refusing to answer.
+        let image = await photo?.value
+
+        guard phase == .thinking else { return }
 
         splitter = TideSentenceSplitter()
         utterancesInFlight = 0
@@ -227,7 +257,7 @@ final class TideVoiceSession: NSObject, ObservableObject {
         // Speak each sentence the moment it is complete, rather than waiting
         // for the whole answer. The model streams, so this is most of a second
         // off the time to the first spoken word.
-        let answer = await conversation.send(question, image: nil) { [weak self] fragment in
+        let answer = await conversation.send(question, image: image) { [weak self] fragment in
             guard let self, self.isAnswering else { return }
             for sentence in self.splitter.feed(fragment) {
                 self.speak(sentence)
