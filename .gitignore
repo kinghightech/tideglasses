@@ -1,1 +1,4 @@
 .rocketride/
+
+# Device key for the tide-vision edge function. Never commit this.
+Tide Glasses/TideSecrets.swift
