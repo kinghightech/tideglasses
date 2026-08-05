@@ -9,6 +9,7 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var glasses: TideGlassesBluetoothManager
     @EnvironmentObject private var media: TideGlassesMediaTransferManager
+    @EnvironmentObject private var memory: TideMemoryStore
     @AppStorage("tide.ownerName") private var ownerName = ""
     @State private var showSettings = false
 
@@ -30,25 +31,30 @@ struct HomeView: View {
                     header
                         .padding(.horizontal, 20)
 
+                    // The glasses need room to breathe on both sides — cramped
+                    // against the greeting above and the pills below, the whole
+                    // screen reads as one dense block.
                     hero
-                        .padding(.top, 4)
+                        .padding(.top, 18)
 
                     statusStack
                         .padding(.horizontal, 20)
-                        .padding(.top, 4)
+                        .padding(.top, 22)
 
                     actionGrid
                         .padding(.horizontal, 20)
-                        .padding(.top, 22)
+                        .padding(.top, 28)
                 }
                 .padding(.top, 4)
-                .padding(.bottom, 24)
+                .padding(.bottom, 28)
             }
             .scrollBounceBehavior(.basedOnSize)
         }
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showSettings) {
-            SettingsView().environmentObject(glasses)
+            SettingsView()
+                .environmentObject(glasses)
+                .environmentObject(memory)
         }
         .onAppear(perform: refreshBattery)
         .onReceive(batteryTimer) { _ in refreshBattery() }
@@ -107,17 +113,32 @@ struct HomeView: View {
         .frame(height: 250)
     }
 
+    // MARK: - Status
+
+    /// Status on the left, battery on the right. The status pill is also the
+    /// connection control now — tapping "Connected" drops the link, tapping
+    /// "Disconnected" goes looking for the glasses. That replaces the tile that
+    /// used to do it, so there is one obvious place to manage the connection
+    /// instead of two.
     private var statusStack: some View {
         HStack(spacing: 10) {
-            GlassPill {
-                Circle()
-                    .fill(glasses.isConnected ? Tide.connected : Tide.disconnected)
-                    .frame(width: 8, height: 8)
+            Button(action: toggleConnection) {
+                GlassPill {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 8, height: 8)
 
-                Text(statusTitle)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(Tide.primaryText)
+                    Text(statusTitle)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(Tide.primaryText)
+                }
             }
+            .buttonStyle(PressableSurface())
+            .disabled(!canToggleConnection)
+            .accessibilityLabel(statusTitle)
+            .accessibilityHint(
+                glasses.isConnected ? "Double tap to disconnect" : "Double tap to connect"
+            )
 
             Button {
                 glasses.refreshBattery()
@@ -144,8 +165,9 @@ struct HomeView: View {
                     }
                 }
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PressableSurface())
             .disabled(!glasses.canRefreshBattery)
+            .accessibilityLabel("Battery")
         }
         .frame(maxWidth: .infinity)
     }
@@ -157,6 +179,28 @@ struct HomeView: View {
         return "Disconnected"
     }
 
+    private var statusColor: Color {
+        if glasses.isConnected { return Tide.connected }
+        if glasses.isConnecting || glasses.isScanning { return Tide.caution }
+        return Tide.disconnected
+    }
+
+    /// Mid-connection there is nothing useful to ask for, so the pill goes inert
+    /// rather than offering an action that would be ignored.
+    private var canToggleConnection: Bool {
+        glasses.isConnected || glasses.canScan
+    }
+
+    private func toggleConnection() {
+        if glasses.isConnected {
+            glasses.disconnect()
+        } else {
+            glasses.startScan()
+        }
+    }
+
+    // MARK: - Actions
+
     private var actionGrid: some View {
         LazyVGrid(
             columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)],
@@ -164,6 +208,7 @@ struct HomeView: View {
         ) {
             ActionTile(
                 title: "Import photos",
+                subtitle: "From your glasses",
                 systemImage: "square.and.arrow.down",
                 enabled: glasses.isConnected
             ) {
@@ -171,56 +216,65 @@ struct HomeView: View {
             }
 
             ActionTile(
-                title: glasses.isTakingPhoto ? "Capturing…" : "Take a photo",
-                systemImage: "camera",
-                enabled: glasses.canTakePhoto
+                title: "Settings",
+                subtitle: "Voice, memory, device",
+                systemImage: "gearshape",
+                enabled: true
             ) {
-                glasses.takePhoto()
-            }
-
-            ActionTile(
-                title: glasses.isConnected ? "Disconnect" : "Connect",
-                systemImage: glasses.isConnected ? "bolt.horizontal" : "antenna.radiowaves.left.and.right",
-                enabled: glasses.isConnected || glasses.canScan
-            ) {
-                if glasses.isConnected {
-                    glasses.disconnect()
-                } else {
-                    glasses.startScan()
-                }
-            }
-
-            ActionTile(title: "Settings", systemImage: "gearshape", enabled: true) {
                 showSettings = true
             }
         }
     }
 }
 
+// MARK: - Pieces
+
 private struct ActionTile: View {
     let title: String
+    let subtitle: String
     let systemImage: String
     let enabled: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 0) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 21, weight: .regular))
+                    .font(.system(size: 20, weight: .medium))
                     .foregroundStyle(Tide.accent)
+                    .frame(height: 24, alignment: .leading)
+
+                Spacer(minLength: 16)
+
                 Text(title)
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Tide.primaryText)
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
+
+                Text(subtitle)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Tide.secondaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .padding(.top, 2)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: 112, alignment: .leading)
             .padding(16)
             .cardSurface(cornerRadius: 20)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableSurface())
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.45)
+    }
+}
+
+/// A press that is felt rather than announced. `.plain` alone gives no feedback
+/// at all, which on a card this large reads as a dead tap.
+private struct PressableSurface: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
