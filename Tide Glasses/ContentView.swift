@@ -38,6 +38,18 @@ struct ContentView: View {
                 .tabItem {
                     Label("AI", systemImage: "brain")
                 }
+
+            ActionsView()
+                .tag(3)
+                .tabItem {
+                    Label("Actions", systemImage: "bolt")
+                }
+
+            GameView()
+                .tag(4)
+                .tabItem {
+                    Label("Game", systemImage: "gamecontroller")
+                }
         }
         .tint(Tide.accent)
         .preferredColorScheme(.dark)

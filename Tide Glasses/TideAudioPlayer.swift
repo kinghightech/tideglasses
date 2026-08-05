@@ -27,6 +27,14 @@ final class TideAudioPlayer: NSObject, ObservableObject {
     private var engineStart: TimeInterval = 0
     private var ticker: Timer?
 
+    /// The whole decoded recording, kept so a tapped line can restart playback
+    /// partway through without decoding the file again.
+    private var sourceBuffer: AVAudioPCMBuffer?
+    private var sourceID: String?
+    /// Where the current buffer started, since the engine only knows how long
+    /// it has been playing the slice it was handed.
+    private var seekOffset: TimeInterval = 0
+
     func isPlaying(_ id: String) -> Bool { playingID == id }
 
     var progress: Double {
@@ -83,12 +91,27 @@ final class TideAudioPlayer: NSObject, ObservableObject {
         deactivateSession()
     }
 
-    /// Plays an already-decoded buffer through the engine.
-    private func playBuffer(_ buffer: AVAudioPCMBuffer, id: String) -> Bool {
+    /// Plays an already-decoded buffer through the engine, optionally starting
+    /// partway in.
+    private func playBuffer(
+        _ buffer: AVAudioPCMBuffer,
+        id: String,
+        startingAt offset: TimeInterval = 0
+    ) -> Bool {
+        let rate = buffer.format.sampleRate
+        let total = Double(buffer.frameLength) / rate
+        let start = min(max(0, offset), max(0, total - 0.05))
+
+        let startFrame = AVAudioFrameCount(start * rate)
+        let toPlay = startFrame > 0
+            ? buffer.tide_slice(from: startFrame, count: buffer.frameLength - startFrame)
+            : buffer
+        guard let toPlay else { return false }
+
         let engine = AVAudioEngine()
         let node = AVAudioPlayerNode()
         engine.attach(node)
-        engine.connect(node, to: engine.mainMixerNode, format: buffer.format)
+        engine.connect(node, to: engine.mainMixerNode, format: toPlay.format)
 
         do {
             try engine.start()
@@ -97,7 +120,7 @@ final class TideAudioPlayer: NSObject, ObservableObject {
             return false
         }
 
-        node.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
+        node.scheduleBuffer(toPlay, at: nil, options: []) { [weak self] in
             Task { @MainActor [weak self] in self?.stop() }
         }
         node.play()
@@ -105,10 +128,55 @@ final class TideAudioPlayer: NSObject, ObservableObject {
         self.engine = engine
         self.engineNode = node
         self.engineStart = Date().timeIntervalSince1970
-        duration = Double(buffer.frameLength) / buffer.format.sampleRate
+        self.sourceBuffer = buffer
+        self.sourceID = id
+        self.seekOffset = start
+        duration = total
         playingID = id
         startTicking()
         return true
+    }
+
+    /// Jumps to a point in the recording and keeps playing from there.
+    ///
+    /// Only the decoded-buffer path supports this, which is the path every
+    /// recording from the glasses takes. Anything opened by AVAudioPlayer seeks
+    /// through its own `currentTime` instead.
+    func seek(url: URL, id: String, to time: TimeInterval) {
+        if let player, playingID == id {
+            player.currentTime = min(max(0, time), player.duration)
+            currentTime = player.currentTime
+            return
+        }
+
+        let buffer = (sourceID == id ? sourceBuffer : nil) ?? decodedBuffer(url: url)
+        guard let buffer else {
+            // Nothing decodable — fall back to starting from the beginning.
+            play(url: url, id: id)
+            return
+        }
+
+        stopPlayback()
+        errorText = nil
+        activateSession()
+        if !playBuffer(buffer, id: id, startingAt: time) {
+            errorText = "That recording could not be played from there."
+            deactivateSession()
+        }
+    }
+
+    private func decodedBuffer(url: URL) -> AVAudioPCMBuffer? {
+        if TideOpusDecoder.looksLikeGlassesOpus(url: url),
+           let buffer = TideOpusDecoder.decode(url: url) {
+            return buffer
+        }
+        guard let file = try? AVAudioFile(forReading: url) else { return nil }
+        let frames = AVAudioFrameCount(file.length)
+        guard frames > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frames),
+              (try? file.read(into: buffer)) != nil
+        else { return nil }
+        return buffer
     }
 
     private func playRawPCM(url: URL, id: String) -> Bool {
@@ -172,6 +240,16 @@ final class TideAudioPlayer: NSObject, ObservableObject {
     }
 
     func stop() {
+        stopPlayback()
+        currentTime = 0
+        seekOffset = 0
+        deactivateSession()
+    }
+
+    /// Tears down the transports without releasing the audio session, so a seek
+    /// can restart immediately instead of re-acquiring the route — which on
+    /// Bluetooth output is audible.
+    private func stopPlayback() {
         ticker?.invalidate()
         ticker = nil
         player?.stop()
@@ -181,8 +259,6 @@ final class TideAudioPlayer: NSObject, ObservableObject {
         engineNode = nil
         engine = nil
         playingID = nil
-        currentTime = 0
-        deactivateSession()
     }
 
     private func activateSession() {
@@ -208,7 +284,7 @@ final class TideAudioPlayer: NSObject, ObservableObject {
                 } else if self.engine != nil {
                     self.currentTime = min(
                         self.duration,
-                        Date().timeIntervalSince1970 - self.engineStart
+                        self.seekOffset + (Date().timeIntervalSince1970 - self.engineStart)
                     )
                 }
             }

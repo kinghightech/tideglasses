@@ -26,6 +26,9 @@ struct TideStoredMessage: Codable, Identifiable, Equatable {
     var failed: Bool
     /// The line this message put into the main memory, if it asked to.
     var savedFact: String?
+    /// A calendar or reminder action. Persisted so a reopened chat keeps
+    /// holding it back from the AI, rather than leaking it on the next reply.
+    var isLocalAction: Bool?
 
     init(
         id: UUID = UUID(),
@@ -33,7 +36,8 @@ struct TideStoredMessage: Codable, Identifiable, Equatable {
         text: String,
         imageFilename: String? = nil,
         failed: Bool = false,
-        savedFact: String? = nil
+        savedFact: String? = nil,
+        isLocalAction: Bool = false
     ) {
         self.id = id
         self.role = role
@@ -41,6 +45,7 @@ struct TideStoredMessage: Codable, Identifiable, Equatable {
         self.imageFilename = imageFilename
         self.failed = failed
         self.savedFact = savedFact
+        self.isLocalAction = isLocalAction
     }
 }
 

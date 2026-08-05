@@ -20,10 +20,47 @@ struct GalleryView: View {
     @State private var selectedIDs = Set<String>()
     @State private var viewerStart: ViewerStart?
     @State private var audioEntry: TideAlbumStore.Entry?
+    @State private var filter: GalleryFilter = .all
 
     private let columns = [
         GridItem(.adaptive(minimum: 110), spacing: 3)
     ]
+
+    enum GalleryFilter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case photos = "Photos"
+        case videos = "Videos"
+        case audio = "Audio"
+
+        var id: String { rawValue }
+
+        func matches(_ entry: TideAlbumStore.Entry) -> Bool {
+            switch self {
+            case .all: true
+            case .photos: entry.kind == .photo
+            case .videos: entry.kind == .video
+            case .audio: entry.kind == .audio
+            }
+        }
+
+        var emptyTitle: String {
+            switch self {
+            case .all: "Nothing imported yet"
+            case .photos: "No photos yet"
+            case .videos: "No videos yet"
+            case .audio: "No recordings yet"
+            }
+        }
+
+        var emptySymbol: String {
+            switch self {
+            case .all: "photo.stack"
+            case .photos: "photo"
+            case .videos: "video"
+            case .audio: "waveform"
+            }
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -42,7 +79,11 @@ struct GalleryView: View {
                 .padding()
             }
             .background(Color.secondary.opacity(0.08))
-            .navigationTitle("Gallery")
+            // No title: the large "Gallery" heading pushed everything down for
+            // no information — the tab bar already says where you are. Inline
+            // mode keeps the Select button without reserving a title row.
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if isSelecting, !selectedIDs.isEmpty {
                     ToolbarItem(placement: .topBarLeading) {
@@ -77,14 +118,23 @@ struct GalleryView: View {
             .fullScreenCover(item: $viewerStart) { start in
                 MediaViewer(entries: viewableEntries, startIndex: start.index)
             }
-            .sheet(item: $audioEntry) { entry in
-                AudioPlaybackSheet(entry: entry, player: audioPlayer)
+            // A full page, not a detent-height popup: a transcript is something
+            // you read and scroll through.
+            .fullScreenCover(item: $audioEntry) { entry in
+                RecordingView(entry: entry, player: audioPlayer)
             }
         }
     }
 
+    private var filteredEntries: [TideAlbumStore.Entry] {
+        album.entries.filter { filter.matches($0) }
+    }
+
+    /// What the full-screen viewer swipes through. Derived from the filtered
+    /// list on purpose: with Photos selected, swiping should stay on photos
+    /// rather than wandering into videos that are not on screen.
     private var viewableEntries: [TideAlbumStore.Entry] {
-        album.entries.filter { $0.kind == .photo || $0.kind == .video }
+        filteredEntries.filter { $0.kind == .photo || $0.kind == .video }
     }
 
     private var importCard: some View {
@@ -206,20 +256,46 @@ struct GalleryView: View {
                 }
                 .frame(minHeight: 240)
             } else {
-                LazyVGrid(columns: columns, spacing: 3) {
-                    ForEach(album.entries) { entry in
-                        AlbumTile(
-                            entry: entry,
-                            isSelecting: isSelecting,
-                            isSelected: selectedIDs.contains(entry.id),
-                            isPlaying: audioPlayer.isPlaying(entry.id)
-                        )
-                        .onTapGesture {
-                            handleTap(entry)
+                filterPicker
+
+                if filteredEntries.isEmpty {
+                    ContentUnavailableView {
+                        Label(filter.emptyTitle, systemImage: filter.emptySymbol)
+                    } description: {
+                        Text("Anything you import will show up here.")
+                    }
+                    .frame(minHeight: 200)
+                } else {
+                    LazyVGrid(columns: columns, spacing: 3) {
+                        ForEach(filteredEntries) { entry in
+                            AlbumTile(
+                                entry: entry,
+                                isSelecting: isSelecting,
+                                isSelected: selectedIDs.contains(entry.id),
+                                isPlaying: audioPlayer.isPlaying(entry.id)
+                            )
+                            .onTapGesture {
+                                handleTap(entry)
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+
+    private var filterPicker: some View {
+        Picker("Show", selection: $filter) {
+            ForEach(GalleryFilter.allCases) { option in
+                Text(option.rawValue).tag(option)
+            }
+        }
+        .pickerStyle(.segmented)
+        .padding(.bottom, 2)
+        // Selections made under one filter are meaningless under another —
+        // you would be deleting things you can no longer see.
+        .onChange(of: filter) { _, _ in
+            selectedIDs = []
         }
     }
 

@@ -42,13 +42,20 @@ struct TideAIMessage: Identifiable {
     var failed = false
     var memoryNote: MemoryNote?
 
+    /// Part of a calendar or reminder action, handled entirely on this phone.
+    /// These are held out of `historyForRequest`, so what is in the wearer's
+    /// calendar never travels to the AI service — not when it happens, and not
+    /// as context on any later question in the same chat.
+    var isLocalAction = false
+
     init(
         id: UUID = UUID(),
         role: Role,
         text: String,
         imageFilename: String? = nil,
         failed: Bool = false,
-        memoryNote: MemoryNote? = nil
+        memoryNote: MemoryNote? = nil,
+        isLocalAction: Bool = false
     ) {
         self.id = id
         self.role = role
@@ -56,6 +63,7 @@ struct TideAIMessage: Identifiable {
         self.imageFilename = imageFilename
         self.failed = failed
         self.memoryNote = memoryNote
+        self.isLocalAction = isLocalAction
     }
 
     var isPending: Bool { role == .assistant && text.isEmpty && !failed }
@@ -69,6 +77,8 @@ final class TideConversation: ObservableObject {
 
     private let chats: TideChatStore
     private let memory: TideMemoryStore
+    private let actions: TideActionRunner
+    private let actionLog: TideActionLog
     private let client = TideAIClient()
     private var streamTask: Task<String?, Never>?
 
@@ -91,9 +101,16 @@ final class TideConversation: ObservableObject {
     private static let historyTurnLimit = 20
     private static let historyCharacterBudget = 6_000
 
-    init(chats: TideChatStore, memory: TideMemoryStore) {
+    init(
+        chats: TideChatStore,
+        memory: TideMemoryStore,
+        actions: TideActionRunner,
+        actionLog: TideActionLog
+    ) {
         self.chats = chats
         self.memory = memory
+        self.actions = actions
+        self.actionLog = actionLog
 
         // Pick up wherever the last conversation left off.
         if let latest = chats.threads.first {
@@ -103,7 +120,11 @@ final class TideConversation: ObservableObject {
 
     var isEmpty: Bool { messages.isEmpty }
 
-    var canRetry: Bool { !isStreaming && messages.last?.failed == true }
+    /// Local actions are not retried through the network — say it again
+    /// instead, once the permission it was asking for has been granted.
+    var canRetry: Bool {
+        !isStreaming && messages.last?.failed == true && messages.last?.isLocalAction != true
+    }
 
     func image(for message: TideAIMessage) -> UIImage? {
         message.imageFilename.flatMap { chats.image(named: $0) }
@@ -146,7 +167,8 @@ final class TideConversation: ObservableObject {
                 text: stored.text,
                 imageFilename: stored.imageFilename,
                 failed: stored.failed,
-                memoryNote: stored.savedFact.map { .saved($0) }
+                memoryNote: stored.savedFact.map { .saved($0) },
+                isLocalAction: stored.isLocalAction ?? false
             )
         }
     }
@@ -191,7 +213,8 @@ final class TideConversation: ObservableObject {
                     savedFact: {
                         if case .saved(let fact) = message.memoryNote { return fact }
                         return nil
-                    }()
+                    }(),
+                    isLocalAction: message.isLocalAction
                 )
             }
         ))
@@ -227,6 +250,15 @@ final class TideConversation: ObservableObject {
             note = memory.append(fact) ? .saved(fact) : .full
         }
 
+        // Calendar and reminder work is done here on the phone, and the request
+        // stops here — no network call, and nothing about it is kept for later
+        // requests either.
+        if let action = TideActionTrigger.action(in: prompt) {
+            messages.append(TideAIMessage(role: .user, text: prompt, isLocalAction: true))
+            persist()
+            return startAction(action, onFragment: onFragment)
+        }
+
         messages.append(TideAIMessage(
             role: .user,
             text: prompt,
@@ -238,6 +270,52 @@ final class TideConversation: ObservableObject {
         persist()
 
         return startStream(prompt: request.question, image: image, onFragment: onFragment)
+    }
+
+    // MARK: - Local actions
+
+    private func startAction(
+        _ action: TideAction,
+        onFragment: (@MainActor (String) -> Void)?
+    ) -> Task<String?, Never> {
+        messages.append(TideAIMessage(role: .assistant, text: "", isLocalAction: true))
+        isStreaming = true
+
+        streamGeneration += 1
+        let generation = streamGeneration
+
+        let task = Task { [weak self] () -> String? in
+            guard let self else { return nil }
+            let outcome = await self.actions.perform(action)
+            return self.complete(outcome, generation: generation, onFragment: onFragment)
+        }
+        streamTask = task
+        return task
+    }
+
+    /// Unlike a failed AI answer, an action outcome is always returned so the
+    /// voice path speaks it. "I do not have access to your reminders" is the
+    /// whole point of asking — staying silent because it technically failed
+    /// would leave someone hands-free with no idea why nothing happened.
+    private func complete(
+        _ outcome: TideActionOutcome,
+        generation: Int,
+        onFragment: (@MainActor (String) -> Void)?
+    ) -> String? {
+        guard isCurrent(generation) else { return nil }
+        isStreaming = false
+        streamTask = nil
+
+        guard let index = messages.indices.last, messages[index].role == .assistant else { return nil }
+        messages[index].text = outcome.spoken
+        messages[index].failed = !outcome.succeeded
+
+        if let record = outcome.record {
+            actionLog.record(record)
+        }
+        onFragment?(outcome.spoken)
+        persist()
+        return outcome.spoken
     }
 
     @discardableResult
@@ -319,6 +397,9 @@ final class TideConversation: ObservableObject {
 
         for message in messages.dropLast().reversed() {
             guard !message.failed, !message.text.isEmpty else { continue }
+            // Reminders and calendar entries stay on the phone. Both halves of
+            // an action are skipped — the request and the confirmation.
+            guard !message.isLocalAction else { continue }
             guard turns.count < Self.historyTurnLimit else { break }
             guard message.text.count <= budget else { break }
 

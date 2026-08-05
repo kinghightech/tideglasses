@@ -17,5 +17,9 @@
 	</array>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Tide Glass turns what you say through your glasses into text on this iPhone. Recognition runs on-device — your voice is never sent to Apple.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Lets you say “remind me to call Mom tomorrow at six” through your glasses and have it saved. Your reminders stay on this iPhone and are never sent to the AI.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Lets you add events and ask what is coming up, spoken through your glasses. Your calendar stays on this iPhone and is never sent to the AI.</string>
 </dict>
 </plist>

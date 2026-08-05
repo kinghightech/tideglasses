@@ -366,6 +366,106 @@ Three bugs fixed here that are easy to reintroduce:
    question you have switched away from writes itself into whatever chat is now
    open.
 
+## Tide Actions — calendar and reminders (built 2026-08-05)
+
+Third trigger in the same family as "take a photo" and "update memory", built
+the same way and for the same reasons. `TideActionTrigger` matches **remind /
+reminder / reminders** and **calendar / schedule / agenda**, within the first
+six words. Everything runs through EventKit on the phone; no network call is
+made and no model is asked to classify anything.
+
+| file | what it does |
+| --- | --- |
+| `TideActionTrigger.swift` | parsing — trigger, intent, date, title |
+| `TideActions.swift` | EventKit execution + spoken confirmations |
+| `TideActionLog.swift` | local history, `Documents/tide-actions.json` |
+| `ActionsView.swift` | the tab: permissions, phrasings, history |
+
+**Nothing about an action reaches the AI service.** Both halves — the request
+and the confirmation — are flagged `isLocalAction` and skipped by
+`historyForRequest()`, so a calendar full of appointments is not replayed as
+context on the next ordinary question. The flag is persisted, so a reopened
+chat keeps holding it back. `TideVoiceSession` was **not modified**: dispatch
+happens inside `TideConversation.send()`, so voice and typing both work and the
+delicate voice state machine was left alone.
+
+Three NSDataDetector behaviours, each **measured** with `scratchpad/detect.swift`,
+not assumed. Do not "simplify" these away:
+
+1. **It does not read spoken numbers.** "tomorrow at six" matches only
+   `tomorrow` and silently defaults to **noon**; "tomorrow at 6" parses
+   correctly. `normalizingSpokenTimes` rewrites one–twelve to digits, but only
+   next to a time word, so "buy six eggs" is untouched.
+2. **It swallows meal names.** "lunch tomorrow at noon" comes back as a single
+   match *including* "lunch", so cutting the date out deleted the event title
+   and the whole thing degraded to a look-up. `removalRange` keeps the meal
+   word.
+3. **A bare hour is read as AM.** "at six" → 06:00. Shifted to PM for hours 1–7
+   unless "am"/"morning"/"noon" was actually said. The confirmation always
+   speaks the resolved time back, which is the safety net for a wrong guess.
+
+Also: title extraction drops everything **up to and including the trigger
+word**, not just leading filler — "Can you remind me to take the bins out"
+stops dead on "Can" otherwise.
+
+**Action outcomes are always spoken, including failures.** This deliberately
+differs from the "failures are shown, never spoken" rule for AI answers: a
+wearer who is hands-free needs to hear "I do not have access to your reminders"
+rather than get silence.
+
+Permissions are granted in the Actions tab, on purpose — the system prompt
+cannot appear on a locked phone, which is exactly when the glasses are used.
+Plist keys: `NSRemindersFullAccessUsageDescription`,
+`NSCalendarsFullAccessUsageDescription` (verified merged into the built binary).
+
+Reminders get an `EKAlarm` as well as `dueDateComponents`; a due date alone
+shows in the list but never notifies, which is not what "remind me" means.
+
+## Note taker — transcripts and summaries (built 2026-08-05)
+
+Tapping an imported voice recording opens a **full page** (`RecordingView`,
+which replaced `AudioPlaybackSheet`), with a Transcribe button and then a
+Summarise button. Both run on-device and cost nothing per minute.
+
+| file | what it does |
+| --- | --- |
+| `TideTranscriber.swift` | SpeechAnalyzer → timed segments |
+| `TideSummarizer.swift` | Foundation Models → notes, with chunking |
+| `TideTranscriptStore.swift` | `Documents/TideTranscripts/<file>.json` |
+| `RecordingView.swift` | the page; player, transcript, notes |
+
+**`SpeechAnalyzer(inputAudioFile:)` does NOT work here, and it is the obvious
+thing to reach for.** The glasses write bare Opus with no container, which
+`AVAudioFile` cannot open — the same fact that made `TideOpusDecoder` necessary
+in the first place. Use the buffer overload, `analyzeSequence(_:)` with
+`AnalyzerInput`, fed from the decoder. Anything that "simplifies" this back to
+the file overload will fail on every glasses recording.
+
+**A transcript does not fit in the Foundation Models context window.**
+`LanguageModelSession.GenerationError.exceededContextWindowSize` is a real case
+in the SDK. `TideSummarizer` splits on sentence boundaries at ~3000 characters,
+summarises each part, then folds the parts together. Each pass uses a **fresh
+`LanguageModelSession`** — reusing one carries every earlier chunk along and
+hits the same wall from the other side.
+
+Other things worth knowing:
+
+- The speech model is installed at system level, not bundled. First run may
+  need `AssetInventory.assetInstallationRequest(supporting:)` and a network
+  connection; progress is surfaced rather than left as a frozen screen.
+- Apple Intelligence needs a supported device. `TideSummarizer.unavailableReason`
+  turns each `SystemLanguageModel.Availability` case into something the wearer
+  can act on; the button disables rather than failing on tap.
+- **The summary never replaces the transcript.** Both are stored, and the page
+  has a Transcript / Notes toggle once a summary exists.
+- Transcripts and summaries are local only and are never attached to an AI
+  request. A recording of a conversation is the last thing that should be
+  uploaded.
+- `TideAudioPlayer` gained `seek(url:id:to:)` so tapping a line jumps to it.
+  It reuses the cached decoded buffer and does **not** release the audio
+  session between seeks — re-acquiring the route is audible on Bluetooth, the
+  same problem that caused the "ching" in the voice path.
+
 ## Speech recognition
 
 - **One shared `SFSpeechRecognizer`, prewarmed at launch.** Building one per
