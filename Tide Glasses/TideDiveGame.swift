@@ -141,6 +141,15 @@ final class TideDiveGame: ObservableObject {
         ticker = nil
     }
 
+    /// Tab views can disappear without the game object being destroyed. The
+    /// old screen stopped its timer on disappear but never started it again,
+    /// leaving a run visibly frozen when the wearer returned to the Game tab.
+    func resumeIfNeeded() {
+        guard phase == .playing, ticker == nil else { return }
+        lastTick = Date.timeIntervalSinceReferenceDate
+        startTicking()
+    }
+
     /// Forward on the strip goes left, backward goes right.
     func move(_ swipe: TideGlassesTouchBar.Swipe) {
         guard phase == .playing else {
@@ -174,9 +183,13 @@ final class TideDiveGame: ObservableObject {
 
     private func startTicking() {
         ticker?.invalidate()
-        ticker = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.step() }
         }
+        ticker = timer
+        // Keep the course moving while a finger is down on the screen. A
+        // default-mode timer pauses during gesture tracking and feels broken.
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func step() {

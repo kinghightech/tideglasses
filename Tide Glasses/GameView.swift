@@ -22,20 +22,27 @@ struct GameView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                sky.ignoresSafeArea()
-                field
+                world.ignoresSafeArea()
+                playSurface
                 overlay
             }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showingProbe = true
                     } label: {
                         Image(systemName: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 14, weight: .bold))
+                            .frame(width: 38, height: 38)
+                            .background(.black.opacity(0.34), in: Circle())
+                            .overlay {
+                                Circle().strokeBorder(.white.opacity(0.22), lineWidth: 1)
+                            }
                     }
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(.white)
                     .accessibilityLabel("Touch strip probe")
                 }
             }
@@ -55,6 +62,7 @@ struct GameView: View {
                 game?.steer(toward: fraction)
             }
             touchBar.startWatchingSystemVolume()
+            game.resumeIfNeeded()
         }
         .onDisappear {
             touchBar.onSwipe = nil
@@ -65,95 +73,117 @@ struct GameView: View {
 
     // MARK: - World
 
-    /// The whole point of the climb: the colour of the world changes with it.
-    private var sky: LinearGradient {
-        LinearGradient(
-            colors: Self.palette(for: game.altitude),
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
+    private var world: some View {
+        ZStack {
+            LinearGradient(
+                colors: Self.palette(for: game.zone),
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
 
-    private static func palette(for altitude: Double) -> [Color] {
-        switch TideDiveGame.Zone.at(altitude) {
-        case .seabed:
-            [Color(red: 0.02, green: 0.09, blue: 0.16), Color(red: 0.01, green: 0.04, blue: 0.08)]
-        case .deep:
-            [Color(red: 0.03, green: 0.16, blue: 0.30), Color(red: 0.01, green: 0.07, blue: 0.15)]
-        case .shallows:
-            [Color(red: 0.10, green: 0.40, blue: 0.58), Color(red: 0.04, green: 0.20, blue: 0.36)]
-        case .surface:
-            [Color(red: 0.55, green: 0.80, blue: 0.88), Color(red: 0.13, green: 0.45, blue: 0.62)]
-        case .sky:
-            [Color(red: 0.25, green: 0.52, blue: 0.86), Color(red: 0.60, green: 0.80, blue: 0.94)]
-        case .space:
-            [Color(red: 0.02, green: 0.02, blue: 0.08), Color(red: 0.06, green: 0.04, blue: 0.18)]
-        }
-    }
+            RadialGradient(
+                colors: [Self.zoneGlow(for: game.zone), .clear],
+                center: .topTrailing,
+                startRadius: 10,
+                endRadius: 480
+            )
 
-    private var field: some View {
-        GeometryReader { geometry in
-            let size = geometry.size
-            let laneWidth = size.width / Double(TideDiveGame.laneCount)
-            let diverY = size.height * 0.72
-            // Screen pixels per world metre. Tuned so a spawn gap reads as a
-            // comfortable gliding distance rather than a wall.
-            let scale = size.height / 420
+            TideAscentScene(
+                altitude: game.altitude,
+                position: game.position,
+                obstacles: game.obstacles,
+                zone: game.zone,
+                phase: game.phase
+            )
+            .opacity(game.phase == .ready ? 0.08 : 1)
 
-            Canvas { context, _ in
-                drawParticles(in: &context, size: size)
-
-                for obstacle in game.obstacles {
-                    let y = diverY - (obstacle.altitude - game.altitude) * scale
-                    guard y > -80, y < size.height + 80 else { continue }
-                    let x = (Double(obstacle.lane) + 0.5) * laneWidth
-
-                    var symbol = context.resolve(Image(systemName: obstacle.kind.symbol))
-                    symbol.shading = .color(.white.opacity(0.92))
-                    context.draw(symbol, at: CGPoint(x: x, y: y))
-                }
-
-                let diverX = (game.position + 0.5) * laneWidth
-                var diver = context.resolve(Image(systemName: "figure.open.water.swim"))
-                diver.shading = .color(.white)
-                context.draw(diver, at: CGPoint(x: diverX, y: diverY))
-            }
-            .animation(.easeOut(duration: 0.12), value: game.position)
-            // Swipe or tap anywhere: the game has to be playable without the
-            // glasses, both to test it and to have it be a game at all.
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 18)
-                    .onEnded { value in
-                        game.move(value.translation.width < 0 ? .forward : .backward)
+            if game.phase == .ready {
+                Image("TideAscentSplash")
+                    .resizable()
+                    .scaledToFill()
+                    .transition(.opacity.combined(with: .scale(scale: 1.035)))
+                    .overlay {
+                        LinearGradient(
+                            colors: [
+                                .black.opacity(0.08),
+                                .clear,
+                                .black.opacity(0.14),
+                                .black.opacity(0.7)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
                     }
-            )
-            .onTapGesture { location in
-                guard game.phase == .playing else { game.start(); return }
-                game.move(location.x < size.width / 2 ? .forward : .backward)
             }
+
+            LinearGradient(
+                colors: [.black.opacity(0.16), .clear, .black.opacity(game.phase == .playing ? 0.24 : 0.46)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            if game.phase == .over {
+                Color(red: 0.08, green: 0.01, blue: 0.08)
+                    .opacity(0.3)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.48), value: game.phase)
+        .animation(.easeInOut(duration: 0.8), value: game.zone.rawValue)
+        .allowsHitTesting(false)
+    }
+
+    private static func palette(for zone: TideDiveGame.Zone) -> [Color] {
+        switch zone {
+        case .seabed:
+            [Color(red: 0.01, green: 0.03, blue: 0.11), Color(red: 0.02, green: 0.2, blue: 0.28), Color(red: 0.1, green: 0.03, blue: 0.2)]
+        case .deep:
+            [Color(red: 0.01, green: 0.08, blue: 0.2), Color(red: 0.02, green: 0.33, blue: 0.46), Color(red: 0.15, green: 0.05, blue: 0.28)]
+        case .shallows:
+            [Color(red: 0.04, green: 0.34, blue: 0.5), Color(red: 0.04, green: 0.65, blue: 0.65), Color(red: 0.02, green: 0.18, blue: 0.36)]
+        case .surface:
+            [Color(red: 0.72, green: 0.9, blue: 0.95), Color(red: 0.07, green: 0.58, blue: 0.75), Color(red: 0.02, green: 0.3, blue: 0.53)]
+        case .sky:
+            [Color(red: 0.18, green: 0.36, blue: 0.84), Color(red: 0.26, green: 0.76, blue: 0.96), Color(red: 0.92, green: 0.45, blue: 0.48)]
+        case .space:
+            [Color(red: 0.01, green: 0.01, blue: 0.08), Color(red: 0.1, green: 0.04, blue: 0.28), Color(red: 0.33, green: 0.04, blue: 0.36)]
         }
     }
 
-    /// Bubbles below the surface, stars above it. Positions come from the
-    /// altitude itself, so they drift downward as the diver climbs without
-    /// needing any state of their own.
-    private func drawParticles(in context: inout GraphicsContext, size: CGSize) {
-        let isSpace = game.altitude > 1050
-        let count = 26
+    private static func zoneGlow(for zone: TideDiveGame.Zone) -> Color {
+        switch zone {
+        case .seabed, .deep: Color(red: 0.24, green: 0.86, blue: 1).opacity(0.46)
+        case .shallows, .surface: Color(red: 0.18, green: 1, blue: 0.77).opacity(0.48)
+        case .sky: Color(red: 1, green: 0.49, blue: 0.18).opacity(0.55)
+        case .space: Color(red: 0.94, green: 0.12, blue: 0.76).opacity(0.5)
+        }
+    }
 
-        for index in 0..<count {
-            let seed = Double((index &* 2654435761) % 1000) / 1000
-            let x = seed * size.width
-            let drift = isSpace ? 0.18 : 0.55
-            let y = (size.height + 40)
-                - ((game.altitude * drift + seed * 900).truncatingRemainder(dividingBy: size.height + 80))
-            let radius = isSpace ? 1.0 + seed * 1.4 : 1.5 + seed * 3.5
-
-            context.fill(
-                Path(ellipseIn: CGRect(x: x, y: y, width: radius * 2, height: radius * 2)),
-                with: .color(.white.opacity(isSpace ? 0.45 + seed * 0.5 : 0.12 + seed * 0.16))
-            )
+    /// Invisible full-screen controls. This remains separate from the renderer
+    /// so the exact swipe/tap mechanics are unchanged by the 3D presentation.
+    private var playSurface: some View {
+        GeometryReader { geometry in
+            Color.clear
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 18)
+                        .onEnded { value in
+                            let horizontal = value.translation.width
+                            let vertical = value.translation.height
+                            if abs(horizontal) >= abs(vertical) {
+                                game.move(horizontal < 0 ? .forward : .backward)
+                            } else {
+                                // Match the physical strip: up moves left and
+                                // down moves right. Horizontal swipes remain
+                                // available because they are natural on a phone.
+                                game.move(vertical < 0 ? .forward : .backward)
+                            }
+                        }
+                )
+                .onTapGesture { location in
+                    guard game.phase == .playing else { game.start(); return }
+                    game.move(location.x < geometry.size.width / 2 ? .forward : .backward)
+                }
         }
     }
 
@@ -161,123 +191,225 @@ struct GameView: View {
 
     private var overlay: some View {
         VStack(spacing: 0) {
-            readout
+            if game.phase != .ready {
+                readout
+            }
             Spacer()
-            if game.phase != .playing { card }
-            Spacer().frame(height: game.phase == .playing ? 0 : 40)
+            if game.phase != .playing {
+                card
+                    // iOS 26's floating tab bar overlays the tab content. This
+                    // explicit clearance keeps every control above it on both
+                    // the 15 Pro and the simulator.
+                    .padding(.bottom, 96)
+            }
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 16)
+        .animation(.spring(response: 0.48, dampingFraction: 0.83), value: game.phase)
+        .allowsHitTesting(true)
     }
 
     private var readout: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(game.score) m")
-                    .font(.system(size: 30, weight: .semibold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.white)
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("ALTITUDE")
+                    .font(.system(size: 9, weight: .black, design: .rounded))
+                    .tracking(1.8)
+                    .foregroundStyle(.white.opacity(0.58))
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text("\(game.score)")
+                        .font(.system(size: 29, weight: .black, design: .rounded).monospacedDigit())
+                        .contentTransition(.numericText())
+                    Text("M")
+                        .font(.system(size: 11, weight: .black, design: .rounded))
+                        .foregroundStyle(Color(red: 0.38, green: 0.94, blue: 1))
+                }
+                .foregroundStyle(.white)
                 Text(game.zone.rawValue)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.72))
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(hudPanel)
+
             Spacer()
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("BEST")
-                    .font(.system(size: 10, weight: .semibold))
-                    .tracking(1.1)
-                    .foregroundStyle(.white.opacity(0.6))
-                Text("\(game.best) m")
-                    .font(.system(size: 16, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.9))
+
+            HStack(spacing: 8) {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 11, weight: .black))
+                    .foregroundStyle(Color(red: 1, green: 0.7, blue: 0.12))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(Int(game.speed)) M/S")
+                        .font(.system(size: 13, weight: .black, design: .rounded).monospacedDigit())
+                        .foregroundStyle(.white)
+                    Text("BEST \(game.best) M")
+                        .font(.system(size: 9, weight: .bold, design: .rounded).monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.58))
+                }
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(hudPanel)
         }
-        .padding(.top, 6)
-        .shadow(radius: 6)
+        .padding(.top, 2)
+    }
+
+    private var hudPanel: some View {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(.black.opacity(0.42))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [.white.opacity(0.34), .white.opacity(0.08)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+            }
+            .shadow(color: .black.opacity(0.28), radius: 14, y: 8)
     }
 
     private var card: some View {
-        VStack(spacing: 12) {
-            Text(game.phase == .over ? "You hit something" : "Ascent")
-                .font(.system(size: 24, weight: .semibold))
+        VStack(spacing: 11) {
+            if game.phase == .over {
+                HStack(spacing: 8) {
+                    Rectangle()
+                        .fill(Color(red: 1, green: 0.27, blue: 0.14))
+                        .frame(width: 26, height: 3)
+                    Text(game.score == game.best && game.score > 0 ? "NEW RECORD" : "RUN ENDED")
+                        .font(.system(size: 11, weight: .black, design: .rounded))
+                        .tracking(2.2)
+                        .foregroundStyle(game.score == game.best && game.score > 0 ? Color.yellow : .white.opacity(0.72))
+                    Rectangle()
+                        .fill(Color(red: 1, green: 0.27, blue: 0.14))
+                        .frame(width: 26, height: 3)
+                }
+
+                HStack(alignment: .lastTextBaseline, spacing: 5) {
+                    Text("\(game.score)")
+                        .font(.system(size: 54, weight: .black, design: .rounded).monospacedDigit())
+                        .tracking(-2)
+                    Text("M")
+                        .font(.system(size: 15, weight: .black, design: .rounded))
+                        .foregroundStyle(Color(red: 0.32, green: 0.94, blue: 1))
+                }
                 .foregroundStyle(.white)
 
-            if game.phase == .over {
-                Text("You reached \(game.score) m — \(game.zone.rawValue.lowercased())")
-                    .font(.system(size: 15))
-                    .foregroundStyle(.white.opacity(0.8))
+                Text("You made it to \(game.zone.rawValue.lowercased()). Best run: \(game.best) m.")
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.68))
             } else {
-                Text("Start on the seabed and get as high as you can.")
-                    .font(.system(size: 15))
+                VStack(spacing: -2) {
+                    Text("ASCENT")
+                        .font(.system(size: 32, weight: .black, design: .rounded).italic())
+                        .tracking(-1.2)
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.white, Color(red: 0.36, green: 0.96, blue: 1)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                    Text("Outrun the ocean")
+                        .font(.system(size: 11, weight: .black, design: .rounded))
+                        .tracking(2)
+                        .textCase(.uppercase)
+                        .foregroundStyle(.white.opacity(0.62))
+                }
+
+                Text("Thread five lanes from the seabed to orbit. Every metre gets faster.")
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
                     .multilineTextAlignment(.center)
-                    .foregroundStyle(.white.opacity(0.8))
+                    .foregroundStyle(.white.opacity(0.7))
             }
 
-            VStack(spacing: 5) {
-                controlHint(
-                    "Slide up the strip",
-                    detail: "move left",
-                    icon: "arrow.left"
-                )
-                controlHint(
-                    "Slide down the strip",
-                    detail: "move right",
-                    icon: "arrow.right"
-                )
-                controlHint(
-                    "Or swipe this screen",
-                    detail: "works without the glasses",
-                    icon: "hand.draw"
-                )
+            HStack(spacing: 0) {
+                controlHint("SLIDE UP", detail: "LEFT", icon: "arrow.left")
+                Divider()
+                    .overlay(.white.opacity(0.16))
+                    .frame(height: 34)
+                controlHint("SLIDE DOWN", detail: "RIGHT", icon: "arrow.right")
             }
-            .padding(.top, 2)
+            .padding(.vertical, 9)
+            .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
 
             Button {
                 game.start()
             } label: {
-                Text(game.phase == .over ? "Go again" : "Dive in")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.black)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(.white, in: Capsule())
+                HStack(spacing: 9) {
+                    Text(game.phase == .over ? "RUN IT BACK" : "LAUNCH RUN")
+                    Image(systemName: "chevron.up.2")
+                        .font(.system(size: 12, weight: .black))
+                }
+                .font(.system(size: 15, weight: .black, design: .rounded))
+                .tracking(0.7)
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 15)
+                .background(
+                    LinearGradient(
+                        colors: [Color(red: 1, green: 0.2, blue: 0.11), Color(red: 1, green: 0.48, blue: 0.06)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+                )
+                .shadow(color: Color(red: 1, green: 0.22, blue: 0.08).opacity(0.42), radius: 18, y: 8)
             }
             .buttonStyle(.plain)
-            .padding(.top, 4)
+            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
 
             if !glasses.isConnected {
-                Text("Glasses not connected — on-screen controls still work.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.6))
+                Label("Tap either side or swipe to steer", systemImage: "iphone.gen3")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.56))
             } else if touchBar.position == nil {
-                Text("Swipe the strip on your glasses once to wake it up. Tap the antenna icon to check what is arriving.")
-                    .font(.system(size: 12))
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.white.opacity(0.6))
+                Label("Swipe your glasses strip once to wake it", systemImage: "eyeglasses")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.56))
+            } else {
+                Label("Glasses control online", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color(red: 0.35, green: 1, blue: 0.73).opacity(0.82))
             }
         }
-        .padding(22)
+        .padding(16)
         .frame(maxWidth: 420)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 25, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(.white.opacity(0.16), lineWidth: 0.8)
+            RoundedRectangle(cornerRadius: 25, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [.white.opacity(0.34), Color.cyan.opacity(0.14), .white.opacity(0.08)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
         }
+        .shadow(color: .black.opacity(0.55), radius: 28, y: 16)
+        .transition(.scale(scale: 0.92).combined(with: .opacity))
     }
 
     private func controlHint(_ title: String, detail: String, icon: String) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 9) {
             Image(systemName: icon)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.75))
-                .frame(width: 16)
-            Text(title)
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.85))
-            Text(detail)
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.55))
-            Spacer(minLength: 0)
+                .font(.system(size: 13, weight: .black))
+                .foregroundStyle(Color(red: 0.35, green: 0.94, blue: 1))
+            VStack(alignment: .leading, spacing: 0) {
+                Text(title)
+                    .font(.system(size: 10, weight: .black, design: .rounded))
+                    .foregroundStyle(.white)
+                Text(detail)
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
         }
+        .frame(maxWidth: .infinity)
     }
+
 }
 
 // MARK: - Probe

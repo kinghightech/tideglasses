@@ -24,7 +24,7 @@ vendor's cloud. Bundle id `com.aahish.Tide-Glasses`.
 5. **Commit often, with real messages.** A rollback should cost one command.
 6. **Keep this file current** so a rewound chat loses nothing.
 
-## Current state (2026-08-04)
+## Current state (2026-08-05)
 
 Working:
 - BLE connect, battery + charging, photo capture.
@@ -38,6 +38,9 @@ Working:
   "take a photo" and it sees what you are looking at. Works with the phone
   locked. Typed chat with photo attachment in the AI tab. See the AI section
   below — read it before touching anything voice- or camera-related.
+- **Ascent game**: five-lane ocean-to-orbit runner controlled by the glasses'
+  touch strip or the phone screen, with a full SceneKit 3D presentation. See
+  the game section below before touching its renderer or controls.
 
 Not working / known issues:
 - Hotspot start is unreliable. Tide's BLE commands are byte-identical to the
@@ -465,6 +468,61 @@ Other things worth knowing:
   It reuses the cached decoded buffer and does **not** release the audio
   session between seeks — re-acquiring the route is audible on Bluetooth, the
   same problem that caused the "ching" in the voice path.
+
+## Ascent game — 3D visual renderer (built 2026-08-05)
+
+The game is still the same five-lane upward dodge mechanic. Its presentation
+was replaced with an original ocean-to-orbit 3D arcade world; the rules,
+collision thresholds, spawn cadence, scoring, touch-strip mapping, and BLE
+observation path were deliberately left unchanged. The timer lifecycle was
+repaired after the redesign: leaving the tab stops the timer and returning
+resumes the same active run.
+
+| file | what it does |
+| --- | --- |
+| `TideDiveGame.swift` | existing game state/mechanics plus the tab-return timer resume hook |
+| `TideGlassesTouchBar.swift` | existing controller bridge — **unchanged by the visual overhaul** |
+| `GameView.swift` | game-only SwiftUI shell, gesture surface, arcade HUD, launch/result cards |
+| `TideAscentScene.swift` | read-only SceneKit renderer fed by `TideDiveGame` state |
+| `TideAscentSplash.imageset` | original generated launch artwork, stored locally in the asset catalog |
+
+`TideAscentScene` builds the visuals from SceneKit geometry at runtime: a
+jet-diver with twin particle exhausts, a perspective current grid, animated
+fish, pulsing jellyfish, low-poly rock clusters, layered macaws with broad
+flapping wings and tapered tails, and rotating satellites. Lighting, fog,
+background objects, and colour grading change at the existing zone boundaries
+from seabed through space. Obstacle nodes are keyed by their existing UUID and
+moved as altitude changes; the renderer never creates a second timer, changes
+an obstacle, or decides a hit.
+
+Layout and lifecycle facts paid for in simulator QA:
+
+- iOS 26's floating tab bar overlays tab content. Ready/game-over cards keep an
+  explicit 96 pt bottom clearance; do not remove it without testing on the
+  15 Pro-sized portrait viewport.
+- `GameView.onDisappear` stops the loop, and `onAppear` calls
+  `resumeIfNeeded()`. The game timer is registered in `.common` run-loop mode
+  so holding or dragging on the screen does not pause the course.
+- Phone input accepts left/right swipes, up/down swipes matching the glasses
+  strip, and left/right-half taps.
+- Scene lane spacing is 1.0 and the camera sits at z 14.2. This combination was
+  forced to lane five in a simulator QA build and keeps the rider's full arms,
+  jet pack, legs, and exhaust inside the frame. Do not widen the lane spacing
+  without rerunning that edge-lane check.
+
+**Keep the separation.** Visual work belongs in `GameView` and
+`TideAscentScene`. Do not move rendering concerns into `TideDiveGame`, and do
+not make the renderer observe or write BLE packets. The transparent gesture
+surface in `GameView` intentionally calls the same `move(_:)` methods as the
+old Canvas version, so phone and glasses controls stay mechanically identical.
+
+Verified 2026-08-05: compact launch card above the floating tab bar, clickable
+launch/restart, active play, game-over layout, layered bird render, and the
+forced far-right lane framing all passed on the iPhone 17 Pro simulator. A
+signed generic-device build also passed. The build was installed on the iPhone
+15 Pro. The automated launch request returned without an error, but command-line
+process inspection did not confirm a live process, so the installed physical-
+device build still needs a quick visual open on the phone.
 
 ## Speech recognition
 
