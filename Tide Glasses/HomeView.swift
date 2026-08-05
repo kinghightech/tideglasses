@@ -41,9 +41,13 @@ struct HomeView: View {
                         .padding(.horizontal, 20)
                         .padding(.top, 22)
 
-                    actionGrid
+                    captureRow
                         .padding(.horizontal, 20)
                         .padding(.top, 28)
+
+                    actionGrid
+                        .padding(.horizontal, 20)
+                        .padding(.top, 14)
                 }
                 .padding(.top, 4)
                 .padding(.bottom, 28)
@@ -201,6 +205,36 @@ struct HomeView: View {
 
     // MARK: - Actions
 
+    /// The three capture actions, compact and side by side.
+    ///
+    /// Only the photo one does anything. `photoMode` (`0x41` payload
+    /// `02 01 01`) is the single capture byte that has been proven on the
+    /// device; there is no known mode value for video, and audio recordings are
+    /// started by holding the button on the glasses — the app has only ever
+    /// imported the files afterwards. Guessing a mode byte is how the front
+    /// button got broken once already.
+    ///
+    /// So video and audio are drawn as ordinary buttons and simply do nothing
+    /// when tapped. They are placeholders for the layout, deliberately: wiring
+    /// them up is a three-line change once the bytes are captured off the Mac
+    /// rig, and nothing here should be sending unproven commands in the
+    /// meantime.
+    private var captureRow: some View {
+        HStack(spacing: 14) {
+            CaptureTile(
+                title: glasses.isTakingPhoto ? "Capturing…" : "Take a photo",
+                systemImage: "camera",
+                enabled: glasses.canTakePhoto
+            ) {
+                glasses.takePhoto()
+            }
+
+            CaptureTile(title: "Take a video", systemImage: "video") {}
+
+            CaptureTile(title: "Record audio", systemImage: "mic") {}
+        }
+    }
+
     private var actionGrid: some View {
         LazyVGrid(
             columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)],
@@ -228,6 +262,42 @@ struct HomeView: View {
 }
 
 // MARK: - Pieces
+
+/// Narrow tile for the three-across capture row. Centred, because three
+/// left-aligned labels at this width read as a ragged column rather than a set.
+private struct CaptureTile: View {
+    let title: String
+    let systemImage: String
+    var enabled = true
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 0) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(Tide.accent)
+
+                Spacer(minLength: 12)
+
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Tide.primaryText)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, minHeight: 96)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 14)
+            .cardSurface(cornerRadius: 18)
+        }
+        .buttonStyle(PressableSurface())
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.45)
+    }
+}
 
 private struct ActionTile: View {
     let title: String
