@@ -24,7 +24,7 @@ vendor's cloud. Bundle id `com.aahish.Tide-Glasses`.
 5. **Commit often, with real messages.** A rollback should cost one command.
 6. **Keep this file current** so a rewound chat loses nothing.
 
-## Current state (2026-08-03)
+## Current state (2026-08-04)
 
 Working:
 - BLE connect, battery + charging, photo capture.
@@ -34,6 +34,10 @@ Working:
   timings, play/pause).
 - UI: onboarding (name + pair), home screen (#111111, large glasses hero,
   glass status/battery pills, action tiles), settings, auto-reconnect loop.
+- **AI assistant**: click the back button, talk, get a spoken answer. Say
+  "take a photo" and it sees what you are looking at. Works with the phone
+  locked. Typed chat with photo attachment in the AI tab. See the AI section
+  below — read it before touching anything voice- or camera-related.
 
 Not working / known issues:
 - Hotspot start is unreliable. Tide's BLE commands are byte-identical to the
@@ -131,10 +135,35 @@ red-button control to prove the capture was live):
 - Nothing in the app or either reference SDK sends a delete command. If media
   vanishes from the glasses after a transfer, the firmware did it.
 
-## AI voice feature (backend + chat done; voice trigger next)
+## AI assistant — BUILT AND WORKING (2026-08-04)
 
-Goal: single-click the back button → glasses enter AI listening → mic audio
-streams over BLE → AI answers, optionally seeing a photo the glasses send.
+Click the back button, talk, get a spoken answer. Say "take a photo" in the
+question and it also sees what you are looking at. Works with the phone locked.
+
+Files, all new except where noted:
+
+| file | what it does |
+| --- | --- |
+| `TideAIClient.swift` | POSTs to the edge function, parses the SSE stream, shrinks images to fit the 400 KB cap |
+| `TideConversation.swift` | one thread of messages; `send()` returns a Task yielding the final answer, and takes an `onFragment` callback |
+| `TideVoiceSession.swift` | the whole voice loop and its state machine |
+| `TideSpeechTranscriber.swift` | on-device speech → text |
+| `TideSentenceSplitter.swift` | splits streamed text into speakable sentences |
+| `TideGlassesPhotoCapture.swift` | pulls a photo over BLE |
+| `TideVoiceCatalog.swift` | picks the TTS voice |
+| `AIView.swift` | chat UI (was an empty stub) |
+| `TideSecrets.swift` | device key, **gitignored** |
+| `TideGlassesBluetoothManager.swift` | *existing file* — three small additions, see below |
+
+**Only three things were added to the BLE manager.** Everything else in the AI
+feature is new files.
+
+1. `onPacket?(command, payload)` in `processPacket` — a read-only tap placed
+   before every existing branch.
+2. `sendVisionCommand(command:payload:)` — a thin pass-through to the private
+   writer, guarded so it refuses to fire during a Wi-Fi transfer negotiation.
+3. A fix to `handleSerialNotification` reassembly (see the next section — this
+   one is important and non-obvious).
 
 **Done (2026-08-04):**
 - `tide-vision` edge function is live on the Kernel project
@@ -157,11 +186,10 @@ watches for `0x73 03 01`, buffers the `0x59` frames, and closes on
 
 Design decisions that were paid for in testing — do not undo casually:
 
-- **One line touches the BLE manager**: `onPacket?(command, payload)` in
-  `processPacket`, a read-only tap placed before every existing branch. The
-  voice session never sends a command to the glasses, so the extended listening
+- **The voice path never sends a command to the glasses.** The longer listening
   that speech-recognition mode (`0x41 [02 01 07]`) would allow is deliberately
-  NOT used — that mode has broken the front button before.
+  NOT used — that mode has broken the front button before. Only the camera
+  writes, and only via the guarded `sendVisionCommand`.
 - **Window stitching**: the firmware's window is a fixed ~5 s, which is not a
   sentence. After it closes there is a **1 second** grace period; another click
   inside it continues the same question instead of starting a new one. Two
@@ -227,9 +255,104 @@ RX  0xFD [01 cntLo cntHi idxLo idxHi] + body
   naturally sequential (mic window closes, *then* capture), so they never
   overlap. Never start a capture while `0x73 03 01` is open.
 
-**Known remaining work:** the BLE vision path is proven on the Mac rig but not
-yet wired into the app — the chat tab can attach photos, but the voice path
-still sends text only.
+## Two bugs that cost hours. Do not reintroduce either.
+
+### 1. BLE packet reassembly — `0xBC` is not always a packet start
+
+`handleSerialNotification` used to say "a fragment beginning with `0xBC` is a
+new packet". That is wrong for anything larger than one BLE notification.
+
+A photo chunk is ~1 KB and arrives as **about five notifications** (182 bytes
+each on this phone). The middle fragments are raw JPEG — arbitrary bytes — so
+roughly 1 in 256 of them begins with `0xBC` by pure coincidence. The old rule
+threw away the half-assembled chunk and wedged the reader, so the retries
+failed too. With ~108 continuation fragments per photo that is a **~34% chance
+of losing the entire photo**, every time. Measured, not estimated.
+
+The rule is now: **`0xBC` starts a packet only when no packet is in flight.**
+Plus a 4 KB ceiling so a corrupt length field cannot wedge the channel forever.
+
+Single-notification packets — which is everything the Wi-Fi transfer path
+exchanges, and every audio frame — behave exactly as before. This is why the
+bug lay dormant since day one: **the photo chunks are the first large packets
+this app has ever received.**
+
+### 2. Phase guards must accept `.looking`
+
+`TideVoiceSession.Phase` is `idle → listening → pausing → thinking → looking →
+speaking`. A guard written as `phase == .thinking` breaks the moment an early
+capture flips the phase to `.looking`, silently dropping the question *after*
+the shutter has fired. Symptom: you hear the shutter and nothing else happens.
+
+**Use `isAnswering`** (thinking ∨ looking ∨ speaking) for "does this answer
+still own the session", never a bare equality check.
+
+## Vision: "take a photo" is the trigger
+
+The camera fires when the wearer says one of `visionTriggers` in
+`TideVoiceSession` — "take a photo", "take a picture", "take a look", "have a
+look", "look at this/that" — matched anywhere in the question.
+
+- **The trigger phrase is deliberately left in the question.** Stripping it
+  mangles real sentences: "take a photo of this plant" became "plant", and
+  "take a look at this and tell me what it says" lost its subject. The model
+  ignores the instruction once an image is attached. Only a *bare* command with
+  no question becomes "What am I looking at?".
+- **An earlier design let the model ask to see** by replying `<<LOOK>>`, and it
+  was reverted. It needed two round trips on exactly the slowest questions, and
+  it misjudged the wearer's real phrasing on device even though it passed
+  synthetic tests. Explicit is faster, simpler, and more private. Do not
+  resurrect it without a strong reason.
+- The capture starts from a **partial** transcript, so the shutter fires as
+  soon as the phrase is heard rather than after recognition finishes. If the
+  final transcript lacks the trigger the capture is cancelled; the photo is not
+  stored on the glasses and never leaves the phone.
+- **AI photos are not saved to the glasses** — confirmed by importing after a
+  capture. Taking one leaves nothing behind.
+
+## Speech recognition
+
+- **One shared `SFSpeechRecognizer`, prewarmed at launch.** Building one per
+  question makes iOS reload the on-device model each time, which was seconds of
+  dead air. Never construct one per call.
+- On-device only (`requiresOnDeviceRecognition = true`). Falling back to
+  Apple's servers would ship the wearer's voice off the phone, which is the
+  thing this app exists to avoid.
+- `TideSpeechTranscriber` logs its own timing to `tide-diagnostics.log`
+  (`transcribed 5.2s of audio in 1.34s`). **Unverified as of this writing** —
+  the wearer reported 7–8 s before the shutter, which pointed at recognition
+  rather than the camera. Pull the log and read the real number before doing
+  anything else about latency.
+
+## Latency budget, measured
+
+| stage | time | changeable? |
+| --- | --- | --- |
+| grace period after speech ends | 1.0 s | yes, but the wearer chose it |
+| speech recognition | ~1 s hoped, **needs measuring** | probably |
+| glasses exposing + encoding a photo | 2.3 s | no, firmware |
+| pulling 22 chunks over BLE | 1.6 s | maybe — pipelining untested |
+| model's first spoken word | ~0.7 s | already streamed sentence-by-sentence |
+
+## Answered questions, so nobody re-researches them
+
+- **Siri cannot be launched from a third-party app.** No API, no URL scheme, no
+  entitlement. SiriKit and App Intents work the other direction. The way to get
+  calendar/reminder actions is tool calling plus EventKit, which also works with
+  the phone locked — Shortcuts needs the screen unlocked and switches apps.
+- **Apple renamed the TTS voice download screen** in iOS 26: Settings →
+  Accessibility → **Read & Speak** → Voices (was "Spoken Content"). Siri's own
+  voice is not available to third-party apps; Premium is the closest.
+
+## Known remaining work
+
+- Transcription timing is instrumented but not yet read. Do that first.
+- Chunk-request pipelining is untested; could take ~0.8 s off a photo.
+- Tool calling (calendar, reminders via EventKit) discussed, not started.
+- The Wi-Fi transfer path still has bugs the wearer has explicitly decided to
+  leave alone: bogus IPs parsed from somewhere during listening windows, and
+  ~800 failed probes in the log. **Do not "fix" these** — that code took two
+  days to stabilise and the wearer wants it untouched.
 
 Known-good references:
 - `/Users/aahishabbani/Projects/nisaetus/nisaetus/live_client.py` — working
