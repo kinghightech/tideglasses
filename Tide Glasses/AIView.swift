@@ -20,6 +20,7 @@ struct AIView: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var isPickingFromLibrary = false
     @State private var isPickingFromAlbum = false
+    @State private var isShowingChats = false
     @FocusState private var isComposerFocused: Bool
 
     private var canSend: Bool {
@@ -41,12 +42,26 @@ struct AIView: View {
             .navigationTitle("Tide AI")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if !conversation.isEmpty {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("Clear") { conversation.clear() }
-                            .foregroundStyle(Tide.secondaryText)
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        isShowingChats = true
+                    } label: {
+                        Image(systemName: "list.bullet")
                     }
+                    .foregroundStyle(Tide.accent)
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        conversation.newThread()
+                    } label: {
+                        Image(systemName: "square.and.pencil")
+                    }
+                    .foregroundStyle(conversation.isEmpty ? Tide.secondaryText : Tide.accent)
+                    .disabled(conversation.isEmpty)
+                }
+            }
+            .sheet(isPresented: $isShowingChats) {
+                ChatListView()
             }
             .photosPicker(
                 isPresented: $isPickingFromLibrary,
@@ -80,7 +95,7 @@ struct AIView: View {
                     }
 
                     ForEach(conversation.messages) { message in
-                        MessageBubble(message: message)
+                        MessageBubble(message: message, image: conversation.image(for: message))
                             .id(message.id)
                     }
 
@@ -333,44 +348,87 @@ struct AIView: View {
 
 private struct MessageBubble: View {
     let message: TideAIMessage
+    let image: UIImage?
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 0) {
-            if message.role == .user { Spacer(minLength: 44) }
+        VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 5) {
+            HStack(alignment: .bottom, spacing: 0) {
+                if message.role == .user { Spacer(minLength: 44) }
 
-            VStack(alignment: .leading, spacing: 9) {
-                if let image = message.image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: 230, maxHeight: 230)
-                        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                VStack(alignment: .leading, spacing: 9) {
+                    if let image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 230, maxHeight: 230)
+                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    }
+
+                    if message.isPending {
+                        TypingDots()
+                    } else if !message.text.isEmpty {
+                        Text(message.text)
+                            .font(.system(size: 16))
+                            .foregroundStyle(message.failed ? Tide.disconnected : Tide.primaryText)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .background(bubbleFill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .strokeBorder(message.role == .user ? .clear : Tide.hairline, lineWidth: 0.8)
                 }
 
-                if message.isPending {
-                    TypingDots()
-                } else if !message.text.isEmpty {
-                    Text(message.text)
-                        .font(.system(size: 16))
-                        .foregroundStyle(message.failed ? Tide.disconnected : Tide.primaryText)
-                        .textSelection(.enabled)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
-            .background(bubbleFill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .strokeBorder(message.role == .user ? .clear : Tide.hairline, lineWidth: 0.8)
+                if message.role == .assistant { Spacer(minLength: 44) }
             }
 
-            if message.role == .assistant { Spacer(minLength: 44) }
+            if let note = message.memoryNote {
+                MemoryChip(note: note)
+            }
         }
     }
 
     private var bubbleFill: Color {
         if message.failed { return Tide.disconnected.opacity(0.14) }
         return message.role == .user ? Tide.accent.opacity(0.85) : Tide.card
+    }
+}
+
+/// Confirms in the transcript that a line went into the main memory — or that
+/// it did not, because memory is full. A save that happened invisibly would be
+/// indistinguishable from one that silently failed.
+private struct MemoryChip: View {
+    let note: TideAIMessage.MemoryNote
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: isFull ? "exclamationmark.triangle.fill" : "brain")
+                .font(.system(size: 11, weight: .medium))
+
+            Text(label)
+                .font(.system(size: 12))
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+        }
+        .foregroundStyle(isFull ? Tide.caution : Tide.secondaryText)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            (isFull ? Tide.caution : Tide.secondaryText).opacity(0.12),
+            in: Capsule()
+        )
+        .padding(.trailing, 4)
+    }
+
+    private var isFull: Bool { note == .full }
+
+    private var label: String {
+        switch note {
+        case .saved(let fact): "Saved to memory: \(fact)"
+        case .full: "Memory is full. Edit it to make room."
+        }
     }
 }
 

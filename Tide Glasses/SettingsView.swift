@@ -8,6 +8,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var glasses: TideGlassesBluetoothManager
+    @EnvironmentObject private var memory: TideMemoryStore
     @Environment(\.dismiss) private var dismiss
     @AppStorage("tide.ownerName") private var ownerName = ""
     @AppStorage("tide.autoConnect") private var autoConnect = true
@@ -17,6 +18,15 @@ struct SettingsView: View {
 
     @State private var previewSynthesizer = AVSpeechSynthesizer()
     private var voices: [TideVoiceCatalog.Option] { TideVoiceCatalog.available() }
+
+    private var memorySummary: String {
+        guard !memory.isEmpty else { return "Empty" }
+        let lines = memory.text
+            .split(separator: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .count
+        return lines == 1 ? "1 line" : "\(lines) lines"
+    }
 
     var body: some View {
         NavigationStack {
@@ -74,6 +84,25 @@ struct SettingsView: View {
                                     .tint(Tide.accent)
                             }
                             Text("Lets Tide see what you are looking at. Adds a couple of seconds to each answer.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(Tide.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Divider().overlay(Tide.hairline)
+                            NavigationLink {
+                                MemoryView()
+                            } label: {
+                                LabeledRow(title: "Memory") {
+                                    HStack(spacing: 6) {
+                                        Text(memorySummary)
+                                            .foregroundStyle(Tide.secondaryText)
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(Tide.secondaryText.opacity(0.6))
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            Text("What Tide knows about you between chats. Say “update memory” to add to it out loud.")
                                 .font(.system(size: 13))
                                 .foregroundStyle(Tide.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)

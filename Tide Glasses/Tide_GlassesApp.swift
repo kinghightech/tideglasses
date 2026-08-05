@@ -12,17 +12,23 @@ struct Tide_GlassesApp: App {
     @StateObject private var glasses: TideGlassesBluetoothManager
     @StateObject private var media: TideGlassesMediaTransferManager
     @StateObject private var album: TideAlbumStore
+    @StateObject private var chats: TideChatStore
+    @StateObject private var memory: TideMemoryStore
     @StateObject private var conversation: TideConversation
     @StateObject private var voice: TideVoiceSession
 
     init() {
         let glasses = TideGlassesBluetoothManager()
         let album = TideAlbumStore()
-        let conversation = TideConversation()
+        let chats = TideChatStore()
+        let memory = TideMemoryStore()
+        let conversation = TideConversation(chats: chats, memory: memory)
         let voice = TideVoiceSession(conversation: conversation, bluetooth: glasses)
 
         _glasses = StateObject(wrappedValue: glasses)
         _album = StateObject(wrappedValue: album)
+        _chats = StateObject(wrappedValue: chats)
+        _memory = StateObject(wrappedValue: memory)
         _conversation = StateObject(wrappedValue: conversation)
         _voice = StateObject(wrappedValue: voice)
         _media = StateObject(wrappedValue: TideGlassesMediaTransferManager(
@@ -39,6 +45,7 @@ struct Tide_GlassesApp: App {
     }
 
     @AppStorage("tide.onboarded") private var onboarded = false
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -52,8 +59,15 @@ struct Tide_GlassesApp: App {
             .environmentObject(glasses)
             .environmentObject(media)
             .environmentObject(album)
+            .environmentObject(chats)
+            .environmentObject(memory)
             .environmentObject(conversation)
             .environmentObject(voice)
+            // A thread is written when a question is asked and when its answer
+            // settles, so this only catches a chat abandoned mid-answer.
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background { conversation.persist() }
+            }
         }
     }
 }

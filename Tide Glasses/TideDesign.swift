@@ -18,6 +18,8 @@ enum Tide {
     static let accent = Color(red: 0.35, green: 0.55, blue: 0.95)
     static let connected = Color(red: 0.20, green: 0.78, blue: 0.35)
     static let disconnected = Color(red: 1.00, green: 0.27, blue: 0.23)
+    /// Approaching a limit — not wrong yet, but worth looking at.
+    static let caution = Color(red: 0.95, green: 0.70, blue: 0.25)
 
     static func greeting(for date: Date = Date()) -> String {
         switch Calendar.current.component(.hour, from: date) {

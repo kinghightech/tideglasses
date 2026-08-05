@@ -46,10 +46,16 @@ struct TideAIClient {
     private static let imageByteBudget = 360_000
 
     /// Streams the answer. Each yielded value is a fragment to append.
+    ///
+    /// `memory` is the wearer's own block of facts. It goes out with every
+    /// request rather than being asked for, because the questions where it
+    /// matters most — "is this safe for me to eat" — are exactly the ones where
+    /// nobody remembers to ask for it.
     func stream(
         question: String,
         image: UIImage?,
-        history: [TideAITurn]
+        history: [TideAITurn],
+        memory: String? = nil
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let work = Task {
@@ -57,7 +63,8 @@ struct TideAIClient {
                     let request = try Self.makeRequest(
                         question: question,
                         image: image,
-                        history: history
+                        history: history,
+                        memory: memory
                     )
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     let status = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -100,7 +107,8 @@ struct TideAIClient {
     private static func makeRequest(
         question: String,
         image: UIImage?,
-        history: [TideAITurn]
+        history: [TideAITurn],
+        memory: String?
     ) throws -> URLRequest {
         let key = TideSecrets.deviceKey
         guard !key.isEmpty else { throw TideAIError.notConfigured }
@@ -117,6 +125,9 @@ struct TideAIClient {
         }
         if !history.isEmpty {
             body["history"] = history.map { ["role": $0.role, "content": $0.content] }
+        }
+        if let memory, !memory.isEmpty {
+            body["memory"] = memory
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request

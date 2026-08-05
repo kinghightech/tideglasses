@@ -145,13 +145,18 @@ Files, all new except where noted:
 | file | what it does |
 | --- | --- |
 | `TideAIClient.swift` | POSTs to the edge function, parses the SSE stream, shrinks images to fit the 400 KB cap |
-| `TideConversation.swift` | one thread of messages; `send()` returns a Task yielding the final answer, and takes an `onFragment` callback |
+| `TideConversation.swift` | the open thread; `send()` returns a Task yielding the final answer, and takes an `onFragment` callback |
 | `TideVoiceSession.swift` | the whole voice loop and its state machine |
 | `TideSpeechTranscriber.swift` | on-device speech → text |
 | `TideSentenceSplitter.swift` | splits streamed text into speakable sentences |
 | `TideGlassesPhotoCapture.swift` | pulls a photo over BLE |
 | `TideVoiceCatalog.swift` | picks the TTS voice |
+| `TideChatStore.swift` | chat threads persisted to `Documents/TideChats` |
+| `TideMemoryStore.swift` | the main memory block (UserDefaults, 1000-char cap) |
+| `TideMemoryTrigger.swift` | parses "update memory …" out of a message |
 | `AIView.swift` | chat UI (was an empty stub) |
+| `ChatListView.swift` | thread list + the way into Memory |
+| `MemoryView.swift` | the memory editor |
 | `TideSecrets.swift` | device key, **gitignored** |
 | `TideGlassesBluetoothManager.swift` | *existing file* — three small additions, see below |
 
@@ -309,6 +314,57 @@ look", "look at this/that" — matched anywhere in the question.
   stored on the glasses and never leaves the phone.
 - **AI photos are not saved to the glasses** — confirmed by importing after a
   capture. Taking one leaves nothing behind.
+
+## Chats and memory (built 2026-08-04)
+
+Chats persist across launches, there can be many of them, and there is a
+separate block of facts that survives across all of them.
+
+**Two different memories. Do not conflate them.**
+
+| | in-chat history | main memory |
+| --- | --- | --- |
+| scope | one thread | every thread |
+| sent as | `history` | `memory` |
+| written by | every message | only the wearer |
+| limit | 20 turns / 6000 chars | 1000 chars |
+
+**The main memory is read on every request and never gated.** This was
+considered and rejected: gating reads behind "use memory" would mean "is this
+safe for me to eat, take a photo" does not know about a peanut allergy, which
+is the exact moment it matters. 1000 chars is ~250 tokens; the cap is what
+controls cost, not gating.
+
+**Only the wearer writes it.** `TideMemoryTrigger` matches "update memory",
+"add to memory", "save to memory", "use memory" at the **start or end** of a
+message — never the middle, because "how do I update memory on my laptop" is
+someone talking *about* memory. The phone appends the line itself. Nothing the
+model returns is ever fed back in. The edge function is told it cannot write to
+memory, and to tell the wearer to say "update memory" if they ask it to
+remember something any other way — otherwise it promises to remember things
+that were never saved.
+
+Same as the camera trigger, **the phrase is left in the question**; the strip
+only decides what gets *stored*.
+
+Storage: `Documents/TideChats/<uuid>.json`, images in `Images/` alongside.
+Chat photos used to be RAM-only — they are written down now, and deleting a
+thread deletes its pictures.
+
+**"remember" is deliberately NOT a trigger.** It is reserved for Tide Remember,
+a later feature for recalling where objects were put. Do not spend it.
+
+Three bugs fixed here that are easy to reintroduce:
+
+1. **The latest question used to be sent twice** — `send()` appends the user
+   message before `historyForRequest()` runs, and the edge function appends the
+   question itself. History must `dropLast()`.
+2. **`persist()` must skip a pending assistant message.** Backgrounding mid-
+   answer otherwise saves the empty placeholder, and reopening that chat shows
+   a typing indicator that never stops.
+3. **In-flight streams carry a `streamGeneration`.** Without it, an answer to a
+   question you have switched away from writes itself into whatever chat is now
+   open.
 
 ## Speech recognition
 
