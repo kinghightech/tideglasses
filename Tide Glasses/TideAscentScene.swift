@@ -42,7 +42,6 @@ struct TideAscentScene: UIViewRepresentable {
         private let player = SCNNode()
         private let obstacleRoot = SCNNode()
         private let trackRoot = SCNNode()
-        private let environmentRoot = SCNNode()
         private let ambientLight = SCNNode()
         private let keyLight = SCNNode()
         private let rimLight = SCNNode()
@@ -58,9 +57,12 @@ struct TideAscentScene: UIViewRepresentable {
             view.scene = scene
             view.backgroundColor = .clear
             view.isOpaque = false
-            view.antialiasingMode = .multisampling4X
+            // SceneKit at the phone's native 3x scale plus 4x MSAA was doing
+            // far more GPU work than this portrait runner needs.
+            view.contentScaleFactor = min(UIScreen.main.scale, 2)
+            view.antialiasingMode = .multisampling2X
             view.preferredFramesPerSecond = 60
-            view.rendersContinuously = true
+            view.rendersContinuously = false
             view.isPlaying = true
             view.allowsCameraControl = false
             view.autoenablesDefaultLighting = false
@@ -71,7 +73,6 @@ struct TideAscentScene: UIViewRepresentable {
             configurePlayer()
 
             scene.rootNode.addChildNode(trackRoot)
-            scene.rootNode.addChildNode(environmentRoot)
             scene.rootNode.addChildNode(obstacleRoot)
             scene.rootNode.addChildNode(player)
             scene.rootNode.addChildNode(cameraTarget)
@@ -95,7 +96,6 @@ struct TideAscentScene: UIViewRepresentable {
             phase: TideDiveGame.Phase
         ) {
             if lastZone?.rawValue != zone.rawValue {
-                rebuildEnvironment(for: zone)
                 applyLighting(for: zone)
                 lastZone = zone
             }
@@ -104,7 +104,7 @@ struct TideAscentScene: UIViewRepresentable {
             updatePlayer(position: position, altitude: altitude, isFlying: phase == .playing)
             updateObstacles(obstacles, altitude: altitude)
 
-            let flyingRate: CGFloat = phase == .playing ? 190 : 26
+            let flyingRate: CGFloat = phase == .playing ? 72 : 0
             jetStreams.forEach { $0.birthRate = flyingRate }
             previousPosition = position
         }
@@ -116,12 +116,9 @@ struct TideAscentScene: UIViewRepresentable {
             camera.fieldOfView = 60
             camera.zNear = 0.1
             camera.zFar = 110
-            camera.wantsHDR = true
-            camera.bloomIntensity = 0.65
-            camera.bloomBlurRadius = 10
-            camera.bloomThreshold = 0.45
-            camera.vignettingIntensity = 0.35
-            camera.vignettingPower = 0.9
+            camera.wantsHDR = false
+            camera.bloomIntensity = 0
+            camera.vignettingIntensity = 0
             cameraNode.camera = camera
             // Pull back enough that the player model remains completely inside
             // the frame in both edge lanes, including its arms and jet pack.
@@ -143,10 +140,7 @@ struct TideAscentScene: UIViewRepresentable {
             let key = SCNLight()
             key.type = .directional
             key.intensity = 1_550
-            key.castsShadow = true
-            key.shadowMode = .deferred
-            key.shadowRadius = 5
-            key.shadowColor = UIColor.black.withAlphaComponent(0.45)
+            key.castsShadow = false
             keyLight.light = key
             keyLight.eulerAngles = SCNVector3(-0.8, -0.55, -0.25)
 
@@ -167,7 +161,7 @@ struct TideAscentScene: UIViewRepresentable {
                 opacity: 0.72
             )
 
-            for rowIndex in 0..<15 {
+            for rowIndex in 0..<11 {
                 let row = SCNNode()
                 row.name = "current-row-\(rowIndex)"
 
@@ -300,11 +294,10 @@ struct TideAscentScene: UIViewRepresentable {
             let delta = position - previousPosition
 
             SCNTransaction.begin()
-            SCNTransaction.animationDuration = 0.1
-            SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .easeOut)
+            SCNTransaction.disableActions = true
             player.position.x = targetX
-            player.eulerAngles.z = Float(-delta * 0.22)
-            player.eulerAngles.y = Float(delta * 0.12)
+            player.eulerAngles.z = Float(-delta * 0.12)
+            player.eulerAngles.y = Float(delta * 0.06)
             player.opacity = isFlying ? 1 : 0.9
             SCNTransaction.commit()
 
@@ -352,28 +345,12 @@ struct TideAscentScene: UIViewRepresentable {
                 let passed = max(-distance, 0)
                 let fade: Double = distance < -14 ? max(0, 1 - ((-distance - 14) / 46)) : 1
 
-                SCNTransaction.begin()
-                SCNTransaction.animationDuration = 0.06
                 node.position = SCNVector3(
                     laneX(Double(obstacle.lane)),
                     Float(-1.58 + progress * 6.45 - passed * 0.012),
                     Float(2.1 - distance * 0.064)
                 )
                 node.opacity = CGFloat(fade)
-                SCNTransaction.commit()
-            }
-        }
-
-        private func rebuildEnvironment(for zone: TideDiveGame.Zone) {
-            environmentRoot.childNodes.forEach { $0.removeFromParentNode() }
-
-            switch zone {
-            case .seabed, .deep, .shallows:
-                addOceanEnvironment(zone: zone)
-            case .surface, .sky:
-                addSkyEnvironment()
-            case .space:
-                addSpaceEnvironment()
             }
         }
 
@@ -452,7 +429,6 @@ struct TideAscentScene: UIViewRepresentable {
                 root.addChildNode(node)
             }
 
-            addGlowRing(to: root, color: UIColor(red: 0.04, green: 0.9, blue: 0.84, alpha: 1), radius: 0.72)
             root.runAction(.repeatForever(.rotateBy(x: 0.3, y: 1.4, z: 0.2, duration: 4.6)))
             return root
         }
@@ -486,7 +462,6 @@ struct TideAscentScene: UIViewRepresentable {
                     .rotateBy(x: 0, y: 0, z: -0.14, duration: 0.55 + Double(index) * 0.03)
                 ])))
             }
-            addGlowRing(to: root, color: UIColor(red: 0.28, green: 0.88, blue: 1, alpha: 1), radius: 0.78)
             root.runAction(.repeatForever(.sequence([
                 .scale(to: 1.06, duration: 0.55),
                 .scale(to: 0.94, duration: 0.55)
@@ -730,125 +705,8 @@ struct TideAscentScene: UIViewRepresentable {
                 .fadeOpacity(to: 1, duration: 0.35)
             ])))
 
-            addGlowRing(to: root, color: UIColor(red: 0.66, green: 0.18, blue: 1, alpha: 1), radius: 1.25)
             root.runAction(.repeatForever(.rotateBy(x: 0.22, y: 1.1, z: 0.18, duration: 3.6)))
             return root
-        }
-
-        // MARK: Environments
-
-        private func addOceanEnvironment(zone: TideDiveGame.Zone) {
-            let bubbleColor = zone == .seabed
-                ? UIColor(red: 0.34, green: 0.82, blue: 1, alpha: 1)
-                : UIColor(red: 0.72, green: 0.96, blue: 1, alpha: 1)
-            let bubbleMaterial = material(bubbleColor, roughness: 0.05, emission: bubbleColor.withAlphaComponent(0.18), opacity: 0.26)
-
-            for index in 0..<30 {
-                let radius = 0.035 + CGFloat((index * 17) % 8) * 0.012
-                let sphere = SCNSphere(radius: radius)
-                sphere.segmentCount = 10
-                sphere.materials = [bubbleMaterial]
-                let bubble = SCNNode(geometry: sphere)
-                let side = Float(((index * 37) % 100)) / 100
-                bubble.position = SCNVector3(
-                    -5.4 + side * 10.8,
-                    -3 + Float((index * 29) % 80) / 8,
-                    -Float(4 + (index * 43) % 62)
-                )
-                environmentRoot.addChildNode(bubble)
-                bubble.runAction(.repeatForever(.sequence([
-                    .moveBy(x: 0.08, y: 1.2, z: 0, duration: 1.7 + Double(index % 5) * 0.22),
-                    .moveBy(x: -0.08, y: -1.2, z: 0, duration: 0)
-                ])))
-            }
-
-            let coralColors = [
-                UIColor(red: 1, green: 0.2, blue: 0.42, alpha: 1),
-                UIColor(red: 0.67, green: 0.17, blue: 1, alpha: 1),
-                UIColor(red: 0.02, green: 0.84, blue: 0.78, alpha: 1)
-            ]
-            for index in 0..<12 {
-                let coral = SCNCone(topRadius: 0.04, bottomRadius: 0.18, height: 0.9 + CGFloat(index % 4) * 0.18)
-                coral.radialSegmentCount = 8
-                let color = coralColors[index % coralColors.count]
-                coral.materials = [material(color, roughness: 0.48, emission: color.withAlphaComponent(0.18))]
-                let node = SCNNode(geometry: coral)
-                let side: Float = index.isMultiple(of: 2) ? -1 : 1
-                node.position = SCNVector3(side * (3.8 + Float(index % 3) * 0.55), -2.25, -Float(2 + index * 4))
-                node.eulerAngles.z = side * 0.16
-                environmentRoot.addChildNode(node)
-            }
-        }
-
-        private func addSkyEnvironment() {
-            let cloudMaterial = material(.white, roughness: 0.92, emission: UIColor.white.withAlphaComponent(0.08), opacity: 0.62)
-
-            for index in 0..<9 {
-                let cloud = SCNNode()
-                for puff in 0..<5 {
-                    let sphere = SCNSphere(radius: 0.55 + CGFloat(puff % 3) * 0.18)
-                    sphere.segmentCount = 12
-                    sphere.materials = [cloudMaterial]
-                    let puffNode = SCNNode(geometry: sphere)
-                    puffNode.position = SCNVector3(Float(puff - 2) * 0.52, Float(puff % 2) * 0.22, 0)
-                    cloud.addChildNode(puffNode)
-                }
-                let side: Float = index.isMultiple(of: 2) ? -1 : 1
-                cloud.position = SCNVector3(side * (4.1 + Float(index % 3) * 0.65), Float(index % 4) - 0.5, -Float(7 + index * 7))
-                cloud.scale = SCNVector3(1.1 + Float(index % 2) * 0.35, 0.72, 0.7)
-                environmentRoot.addChildNode(cloud)
-            }
-
-            let sun = SCNSphere(radius: 1.15)
-            sun.segmentCount = 24
-            sun.materials = [material(
-                UIColor(red: 1, green: 0.79, blue: 0.26, alpha: 1),
-                roughness: 0.2,
-                emission: UIColor(red: 1, green: 0.42, blue: 0.08, alpha: 1)
-            )]
-            let sunNode = SCNNode(geometry: sun)
-            sunNode.position = SCNVector3(5.5, 7, -65)
-            environmentRoot.addChildNode(sunNode)
-        }
-
-        private func addSpaceEnvironment() {
-            let colors = [UIColor.white, UIColor.cyan, UIColor(red: 0.9, green: 0.36, blue: 1, alpha: 1)]
-            for index in 0..<70 {
-                let star = SCNSphere(radius: 0.025 + CGFloat(index % 4) * 0.012)
-                star.segmentCount = 6
-                let color = colors[index % colors.count]
-                star.materials = [material(color, emission: color, opacity: 0.75)]
-                let node = SCNNode(geometry: star)
-                node.position = SCNVector3(
-                    -7 + Float((index * 41) % 140) / 10,
-                    -3 + Float((index * 67) % 110) / 10,
-                    -Float(4 + (index * 31) % 76)
-                )
-                environmentRoot.addChildNode(node)
-            }
-
-            let planet = SCNSphere(radius: 2.6)
-            planet.segmentCount = 32
-            planet.materials = [material(
-                UIColor(red: 0.33, green: 0.12, blue: 0.7, alpha: 1),
-                metalness: 0.04,
-                roughness: 0.72,
-                emission: UIColor(red: 0.08, green: 0.02, blue: 0.2, alpha: 1)
-            )]
-            let planetNode = SCNNode(geometry: planet)
-            planetNode.position = SCNVector3(-6.5, 5.8, -68)
-            environmentRoot.addChildNode(planetNode)
-
-            let ring = SCNTorus(ringRadius: 3.7, pipeRadius: 0.12)
-            ring.materials = [material(
-                UIColor(red: 0.95, green: 0.42, blue: 1, alpha: 1),
-                emission: UIColor(red: 0.38, green: 0.06, blue: 0.62, alpha: 1),
-                opacity: 0.72
-            )]
-            let ringNode = SCNNode(geometry: ring)
-            ringNode.position = planetNode.position
-            ringNode.eulerAngles = SCNVector3(0.7, 0.15, 0.35)
-            environmentRoot.addChildNode(ringNode)
         }
 
         // MARK: Geometry helpers
@@ -952,24 +810,13 @@ struct TideAscentScene: UIViewRepresentable {
             root.addChildNode(node)
         }
 
-        private func addGlowRing(to root: SCNNode, color: UIColor, radius: CGFloat) {
-            let ring = SCNTorus(ringRadius: radius, pipeRadius: 0.025)
-            ring.ringSegmentCount = 36
-            ring.pipeSegmentCount = 8
-            ring.materials = [material(color, emission: color, opacity: 0.72)]
-            let node = SCNNode(geometry: ring)
-            node.eulerAngles.x = .pi / 2
-            node.position.z = -0.2
-            root.addChildNode(node)
-        }
-
         private func makeJetStream() -> SCNParticleSystem {
             let stream = SCNParticleSystem()
-            stream.birthRate = 190
-            stream.particleLifeSpan = 0.48
-            stream.particleLifeSpanVariation = 0.16
-            stream.particleSize = 0.08
-            stream.particleSizeVariation = 0.045
+            stream.birthRate = 72
+            stream.particleLifeSpan = 0.32
+            stream.particleLifeSpanVariation = 0.08
+            stream.particleSize = 0.065
+            stream.particleSizeVariation = 0.025
             stream.particleColor = UIColor(red: 0.25, green: 0.95, blue: 1, alpha: 1)
             stream.particleColorVariation = SCNVector4(0.08, 0.08, 0.02, 0.12)
             stream.blendMode = .additive
@@ -992,10 +839,10 @@ struct TideAscentScene: UIViewRepresentable {
             opacity: CGFloat = 1
         ) -> SCNMaterial {
             let material = SCNMaterial()
-            material.lightingModel = .physicallyBased
+            material.lightingModel = .blinn
             material.diffuse.contents = color
-            material.metalness.contents = metalness
-            material.roughness.contents = roughness
+            material.specular.contents = UIColor.white.withAlphaComponent(0.08 + metalness * 0.28)
+            material.shininess = max(0.04, (1 - roughness) * 0.55)
             material.emission.contents = emission ?? UIColor.black
             material.transparency = opacity
             material.isDoubleSided = true

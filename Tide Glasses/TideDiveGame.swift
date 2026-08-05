@@ -14,10 +14,11 @@
 //
 
 import Combine
+import QuartzCore
 import SwiftUI
 
 @MainActor
-final class TideDiveGame: ObservableObject {
+final class TideDiveGame: NSObject, ObservableObject {
     enum Phase: Equatable {
         case ready
         case playing
@@ -98,7 +99,7 @@ final class TideDiveGame: ObservableObject {
     @Published private(set) var obstacles: [Obstacle] = []
     @Published private(set) var best = 0
 
-    private var ticker: Timer?
+    private var displayLink: CADisplayLink?
     private var lastTick: TimeInterval = 0
     private var nextSpawn: Double = 0
 
@@ -120,7 +121,8 @@ final class TideDiveGame: ObservableObject {
     var score: Int { Int(altitude) }
     var speed: Double { min(Self.topSpeed, Self.baseSpeed + altitude * Self.speedGain) }
 
-    init() {
+    override init() {
+        super.init()
         best = UserDefaults.standard.integer(forKey: Self.bestKey)
     }
 
@@ -132,21 +134,21 @@ final class TideDiveGame: ObservableObject {
         obstacles = []
         nextSpawn = 260
         phase = .playing
-        lastTick = Date.timeIntervalSinceReferenceDate
+        lastTick = CACurrentMediaTime()
         startTicking()
     }
 
     func stop() {
-        ticker?.invalidate()
-        ticker = nil
+        displayLink?.invalidate()
+        displayLink = nil
     }
 
     /// Tab views can disappear without the game object being destroyed. The
     /// old screen stopped its timer on disappear but never started it again,
     /// leaving a run visibly frozen when the wearer returned to the Game tab.
     func resumeIfNeeded() {
-        guard phase == .playing, ticker == nil else { return }
-        lastTick = Date.timeIntervalSinceReferenceDate
+        guard phase == .playing, displayLink == nil else { return }
+        lastTick = CACurrentMediaTime()
         startTicking()
     }
 
@@ -182,20 +184,25 @@ final class TideDiveGame: ObservableObject {
     // MARK: - Loop
 
     private func startTicking() {
-        ticker?.invalidate()
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.step() }
-        }
-        ticker = timer
-        // Keep the course moving while a finger is down on the screen. A
-        // default-mode timer pauses during gesture tracking and feels broken.
-        RunLoop.main.add(timer, forMode: .common)
+        displayLink?.invalidate()
+        let link = CADisplayLink(target: self, selector: #selector(displayLinkDidFire(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(
+            minimum: 30,
+            maximum: 60,
+            preferred: 60
+        )
+        displayLink = link
+        // Common mode keeps the course moving while a finger is tracking.
+        link.add(to: .main, forMode: .common)
     }
 
-    private func step() {
+    @objc private func displayLinkDidFire(_ link: CADisplayLink) {
+        step(at: link.timestamp)
+    }
+
+    private func step(at now: TimeInterval) {
         guard phase == .playing else { return }
 
-        let now = Date.timeIntervalSinceReferenceDate
         // Clamped so a stall — backgrounding, a long frame — cannot teleport
         // the diver through an obstacle.
         let delta = min(0.05, now - lastTick)

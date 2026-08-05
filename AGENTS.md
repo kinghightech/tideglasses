@@ -489,11 +489,11 @@ resumes the same active run.
 `TideAscentScene` builds the visuals from SceneKit geometry at runtime: a
 jet-diver with twin particle exhausts, a perspective current grid, animated
 fish, pulsing jellyfish, low-poly rock clusters, layered macaws with broad
-flapping wings and tapered tails, and rotating satellites. Lighting, fog,
-background objects, and colour grading change at the existing zone boundaries
-from seabed through space. Obstacle nodes are keyed by their existing UUID and
-moved as altitude changes; the renderer never creates a second timer, changes
-an obstacle, or decides a hit.
+flapping wings and tapered tails, and rotating satellites. Lighting, fog, and
+colour grading change at the existing zone boundaries from seabed through
+space. Obstacle nodes are keyed by their existing UUID and moved as altitude
+changes; the renderer never creates a second timer, changes an obstacle, or
+decides a hit.
 
 Layout and lifecycle facts paid for in simulator QA:
 
@@ -501,14 +501,31 @@ Layout and lifecycle facts paid for in simulator QA:
   explicit 96 pt bottom clearance; do not remove it without testing on the
   15 Pro-sized portrait viewport.
 - `GameView.onDisappear` stops the loop, and `onAppear` calls
-  `resumeIfNeeded()`. The game timer is registered in `.common` run-loop mode
-  so holding or dragging on the screen does not pause the course.
+  `resumeIfNeeded()`. The game uses one `CADisplayLink` in `.common` run-loop
+  mode, so holding or dragging does not pause the course. Do not replace it
+  with a timer callback that creates a `Task` every frame; that queue caused
+  severe slowdown on the phone.
 - Phone input accepts left/right swipes, up/down swipes matching the glasses
   strip, and left/right-half taps.
 - Scene lane spacing is 1.0 and the camera sits at z 14.2. This combination was
   forced to lane five in a simulator QA build and keeps the rider's full arms,
   jet pack, legs, and exhaust inside the frame. Do not widen the lane spacing
   without rerunning that edge-lane check.
+
+Performance guardrails added after the first 3D build lagged badly on-device:
+
+- SceneKit renders at at most 2x scale with 2x MSAA. HDR, bloom, vignette,
+  deferred shadows, and physically based materials are off; the scene uses
+  lightweight Blinn materials.
+- There are 11 current-grid rows, exhaust is capped at 72 particles/s per jet,
+  and per-frame obstacle/player transforms do not enqueue animation
+  transactions.
+- Decorative coral cones, bubbles, clouds, stars, planets, and obstacle glow
+  rings were removed. Only the course, player, and actual collision obstacles
+  belong in the playfield; side decorations were visually confusing and added
+  dozens of animated SceneKit nodes.
+- Do not re-enable those effects as a bundle. Any visual effect must be added
+  one at a time and profiled on the physical iPhone before it stays.
 
 **Keep the separation.** Visual work belongs in `GameView` and
 `TideAscentScene`. Do not move rendering concerns into `TideDiveGame`, and do
@@ -519,10 +536,11 @@ old Canvas version, so phone and glasses controls stay mechanically identical.
 Verified 2026-08-05: compact launch card above the floating tab bar, clickable
 launch/restart, active play, game-over layout, layered bird render, and the
 forced far-right lane framing all passed on the iPhone 17 Pro simulator. A
-signed generic-device build also passed. The build was installed on the iPhone
-15 Pro. The automated launch request returned without an error, but command-line
-process inspection did not confirm a live process, so the installed physical-
-device build still needs a quick visual open on the phone.
+performance pass removed all non-gameplay side objects; an active simulator
+run sampled 22–26% host CPU with no per-frame task buildup. A signed generic-
+device build also passed and was installed on the iPhone 15 Pro. The physical-
+device build still needs a quick visual/performance run on the phone; automated
+launch was rejected because the phone was locked.
 
 ## Speech recognition
 
