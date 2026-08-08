@@ -39,7 +39,7 @@ enum TideAIError: LocalizedError {
 
 struct TideAIClient {
     private static let endpoint = URL(
-        string: "https://zwxmmkiwvhsjdztenwfy.supabase.co/functions/v1/tide-vision"
+        string: "https://uteervxxzmmhbzymouin.supabase.co/functions/v1/tide-vision"
     )!
 
     /// The function rejects anything over 400 KB decoded; stay clear of the edge.

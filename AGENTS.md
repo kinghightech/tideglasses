@@ -174,8 +174,14 @@ feature is new files.
    one is important and non-obvious).
 
 **Done (2026-08-04):**
-- `tide-vision` edge function is live on the Kernel project
-  (`zwxmmkiwvhsjdztenwfy`). Reads secret `OPENROUTER_API_KEY`, model
+- `tide-vision` edge function is live on the **Dharma Daily** project
+  (`uteervxxzmmhbzymouin`). It ran on Kernel (`zwxmmkiwvhsjdztenwfy`) until
+  2026-08-08; Kernel belongs to another app, and Supabase's two-project cap was
+  the only reason it ever lived there. Kernel's copy is still deployed as a
+  fallback and can be deleted from the dashboard once this has run a while.
+  Source is version-controlled at `supabase/functions/tide-vision/index.ts` —
+  edit that file and redeploy, never edit only on the server.
+  Reads secret `OPENROUTER_API_KEY`, model
   `openai/gpt-5.6-luna`, `verify_jwt: false`, auth by an `x-tide-key` header
   checked against a SHA-256 hash in its own source. Streams SSE, sets
   `data_collection: "deny"` so no provider retains the wearer's photos, and its
@@ -607,8 +613,9 @@ Constraints:
 - Decode incoming mic frames the same way as recordings (see above).
 
 Backend: OpenRouter model `openai/gpt-5.6-luna`, called from a Supabase edge
-function (project `kernel`, secret `Openrouter_Api_key`). The app should call
-the edge function, never hold the key.
+function (project `Dharma Daily` / `uteervxxzmmhbzymouin`, secret
+`OPENROUTER_API_KEY`). The app should call the edge function, never hold the
+key.
 
 ## Tooling
 
