@@ -17,8 +17,6 @@ struct SettingsView: View {
     @AppStorage(TideVoiceCatalog.preferenceKey) private var voiceIdentifier = ""
 
     @State private var previewSynthesizer = AVSpeechSynthesizer()
-    @State private var findPhase: TideFindPhase = .idle
-    @State private var findResetTask: Task<Void, Never>?
     private var voices: [TideVoiceCatalog.Option] { TideVoiceCatalog.available() }
 
     private var memorySummary: String {
@@ -69,21 +67,6 @@ struct SettingsView: View {
                                     Text(firmware)
                                         .font(.system(size: 13, design: .monospaced))
                                         .foregroundStyle(Tide.secondaryText)
-                                }
-                            }
-                            if glasses.isConnected {
-                                Divider().overlay(Tide.hairline)
-                                Button(action: playFindSound) {
-                                    HStack(spacing: 7) {
-                                        Image(systemName: "speaker.wave.3")
-                                        Text(findLabel)
-                                    }
-                                    .font(.system(size: 15))
-                                    .foregroundStyle(Tide.accent)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                }
-                                .sensoryFeedback(trigger: findPhase) { _, phase in
-                                    phase == .beeping ? .impact(weight: .light) : nil
                                 }
                             }
                         }
@@ -223,26 +206,6 @@ struct SettingsView: View {
             ? TideVoiceCatalog.resolved()
             : AVSpeechSynthesisVoice(identifier: voiceIdentifier)
         previewSynthesizer.speak(utterance)
-    }
-
-    private var findLabel: String {
-        switch findPhase {
-        case .idle: "Play a sound to find them"
-        case .beeping: "Beeping…"
-        case .failed: "Not ready — try again"
-        }
-    }
-
-    private func playFindSound() {
-        findPhase = glasses.playFindDeviceSound() ? .beeping : .failed
-        guard let duration = findPhase.duration else { return }
-
-        findResetTask?.cancel()
-        findResetTask = Task {
-            try? await Task.sleep(for: duration)
-            guard !Task.isCancelled else { return }
-            findPhase = .idle
-        }
     }
 
     private func panel<Content: View>(

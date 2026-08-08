@@ -12,8 +12,6 @@ struct HomeView: View {
     @EnvironmentObject private var memory: TideMemoryStore
     @AppStorage("tide.ownerName") private var ownerName = ""
     @State private var showSettings = false
-    @State private var findPhase: TideFindPhase = .idle
-    @State private var findResetTask: Task<Void, Never>?
 
     /// Battery refreshes on its own while the home screen is visible.
     private let batteryTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
@@ -252,15 +250,6 @@ struct HomeView: View {
             }
 
             ActionTile(
-                title: "Find my glasses",
-                subtitle: findSubtitle,
-                systemImage: "speaker.wave.3",
-                enabled: glasses.isConnected
-            ) {
-                playFindSound()
-            }
-
-            ActionTile(
                 title: "Settings",
                 subtitle: "Voice, memory, device",
                 systemImage: "gearshape",
@@ -268,31 +257,6 @@ struct HomeView: View {
             ) {
                 showSettings = true
             }
-        }
-        .sensoryFeedback(trigger: findPhase) { _, phase in
-            phase == .beeping ? .impact(weight: .light) : nil
-        }
-    }
-
-    private var findSubtitle: String {
-        switch findPhase {
-        case .idle: "Play a sound"
-        case .beeping: "Beeping…"
-        case .failed: "Not ready"
-        }
-    }
-
-    /// The glasses beep for a moment and stop on their own, so there is nothing
-    /// to cancel — the label just needs to fall back once the sound is over.
-    private func playFindSound() {
-        findPhase = glasses.playFindDeviceSound() ? .beeping : .failed
-        guard let duration = findPhase.duration else { return }
-
-        findResetTask?.cancel()
-        findResetTask = Task {
-            try? await Task.sleep(for: duration)
-            guard !Task.isCancelled else { return }
-            findPhase = .idle
         }
     }
 }

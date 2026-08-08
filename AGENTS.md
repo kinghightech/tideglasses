@@ -28,9 +28,6 @@ vendor's cloud. Bundle id `com.aahish.Tide-Glasses`.
 
 Working:
 - BLE connect, battery + charging, photo capture.
-- Find my glasses: a tile on the home screen and a row in settings make the
-  glasses play their own locate sound. See the protocol note below — the byte
-  is well-sourced but the beep is still awaiting its first listen.
 - Wi-Fi media import: gallery, full-quality photo/video/audio download, save to
   Photos + in-app album, progress UI. **Fragile — do not touch.**
 - Voice recordings play in-app (tap a tile → player sheet with waveform,
@@ -60,13 +57,6 @@ Not working / known issues:
   every public SDK but present in the official app's traffic).
 - Stop transfer: `0x41` payload `02 01 09`. Official app sends this at the end
   of every session.
-- Find device (beep): `0x41` payload `02 01 0D` —
-  `QCOperatorDeviceModeFindDevice`. Wired to the home tile and settings row via
-  `TideFindMyGlasses.swift`. ⚠️ **Sent from the app but not yet heard on the
-  physical device** — confirm it beeps, confirm it stops on its own, and note
-  the duration here. There is no FindDeviceStop mode in the vendor enum, which
-  is why it is expected to self-terminate. Its reply is inert: it fails
-  `isPhotoMode` and returns without touching published state.
 - Opening handshake (official app, paced ~60–150 ms apart): `0x43 [01]`,
   `0x40 [YY MM DD HH MM SS 01 29 02]` BCD time, `0x47 [01]`,
   `0x41 [02 04]` media counts, `0x42 [01]` battery.
