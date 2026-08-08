@@ -47,6 +47,59 @@ Not working / known issues:
   official Cyan app (verified via HCI capture) yet Cyan brings the hotspot up
   in 12–19 s while Tide often times out at 36 s with event `0x73 09 FF 02`.
   Cause is below the app layer; unresolved.
+- **"Find my glasses" was attempted 2026-08-08 and reverted** (commits
+  `00eb649` then `2078492`). See the two-command-spaces note below before
+  trying again — the obvious approach is proven wrong.
+
+## Two command spaces — do not mix them up (learned 2026-08-08)
+
+This cost a shipped-then-reverted feature. The glasses answer to **two
+unrelated command sets on two different characteristics**, and the opcode
+tables floating around describe both without saying which is which.
+
+| | serial channel | small-data channel |
+| --- | --- | --- |
+| Write / notify | `DE5BF72A` / `DE5BF729` | `6E400002` / `6E400003` |
+| Framing | `[0xBC, cmd, lenLE16, crc16modbusLE16, payload]` | fixed-length buffer, `[cmd, subdata…]` + `addCRC` |
+| Source of truth | QCSDK `QCDFU_Utils.h`, nisaetus `protocol.py` | Android AAR `com.oudmon.ble.base.communication` |
+| Examples | `0x41` glasses control, `0x42` battery, `0x73` events | `0x3E` glass-model control, `0x3B` touch, `0x50` anti-lost |
+
+**Everything Tide sends today is the serial channel.** The app discovers and
+subscribes to the small-data channel but has never written to it.
+
+The tell that these are different spaces: the Android SDK's
+`GlassModelControlReq` is `0x3E`, while our working glasses-control command is
+`0x41`. Same concept, different opcode. An opcode from one table means nothing
+in the other.
+
+What was tried for find-device, and what actually happened:
+
+- `0x41` payload `02 01 0D` (`QCOperatorDeviceModeFindDevice`, `0x0D`
+  corroborated by the vendor enum ordering **and** nisaetus's explicit
+  `FIND_DEVICE = 0x0D`). The glasses replied `02 01 0D FF FF` every time —
+  work type echoed, **status byte `FF`**. Compare the photo path, which
+  requires `payload[3] == 0` for success. The firmware knows the opcode and
+  refuses it. Two independent references agreeing did not make it work.
+- The real vendor implementation is `FindDeviceReq` in the Android AAR:
+  command **`0x50`** (`Constants.CMD_ANTI_LOST_RATE`) with subdata `55 AA`,
+  extracted from the class bytecode (`bipush 0x50` into `BaseReqCmd.<init>`;
+  `getSubData` returns `[0x55, 0xAA]`). That is a **small-data channel**
+  command, so sending it through `sendVisionCommand` cannot work — it needs a
+  second write transport, which the additive-only rule forbids without a
+  deliberate decision.
+- Unknown whether AIMB-G2 firmware implements `0x50` at all. It is
+  `CMD_ANTI_LOST_RATE`, a smartband command, and this SDK's constant table is
+  full of band features (`CMD_BP_*`, `CMD_MENSTRUATION`, heart rate) that these
+  glasses plainly do not have. **Prove it on the Mac rig before writing Swift.**
+- Simpler alternative if the beep is ever wanted again: the glasses are an A2DP
+  audio sink and the app already plays TTS through them, so a loud tone from
+  the phone needs no protocol work at all.
+
+Reading the Android AAR without a JVM (there is no `java` on this Mac): unzip
+the `.aar`, unzip `classes.jar`, then parse the `.class` constant pool in
+Python. Command ids are a `bipush` in the constructor right before
+`invokespecial BaseReqCmd.<init>`; payloads are the `newarray`/`bastore`
+sequence in `getSubData`.
 
 ## Protocol facts (verified on the physical device)
 
